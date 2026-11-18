@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.3
+version: 1.5.1+yuno.4
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
@@ -40,8 +40,19 @@ config_schema:
   auto_devices:
     type: bool
     default: true
-    label: Auto-bind serial devices
-    description: "Bind every /dev/ttyACM* and /dev/ttyUSB* present at spawn time read-write into the sandbox with --dev-bind, so a board that was plugged in after startup is usable. Already-listed binds are not duplicated."
+    label: Auto-bind matched paths
+    description: "Bind the paths matched by auto_globs at spawn time, read-write, so a board plugged in after startup is usable without touching config. Already-listed binds are not duplicated."
+  auto_globs:
+    type: list
+    default: ["/dev/ttyACM*", "/dev/ttyUSB*"]
+    label: Auto-bind globs
+    description: "Glob patterns auto_devices resolves on every spawn, for example [\"/dev/ttyACM*\", \"/dev/serial/by-id/*\", \"/dev/bus/usb/*/*\"]. An explicit empty list disables the feature; an unset key keeps the serial default."
+  auto_globs_kind:
+    type: str
+    choices: [device, any]
+    default: device
+    label: Auto-bind path kinds
+    description: "device: only character/block device nodes are auto-bound (a stale symlink or a directory is skipped). any: regular files and sockets too, for tools that need a path of their own."
   binds:
     type: list
     default: []

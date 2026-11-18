@@ -169,6 +169,8 @@ DEFAULT_MAX_PROCS = 256
 SETTING_PROFILE = "profile"
 SETTING_BINDS = "binds"
 SETTING_AUTO_DEVICES = "auto_devices"
+SETTING_AUTO_GLOBS = "auto_globs"
+SETTING_AUTO_GLOBS_KIND = "auto_globs_kind"
 SETTING_TRUST_OPERATOR = "trust_operator"
 SETTING_MEMORY_MB = "memory_mb"
 SETTING_CPU_SECONDS = "cpu_seconds"
@@ -177,8 +179,9 @@ SETTING_HOME_ALLOW = "home_allow"
 SETTING_HIDE = "hide"
 SETTING_HOME_DEFAULT_DENY = "home_default_deny"
 SETTINGS_PREFIX = "plugins.entries.bubblewrap-yuno.settings"
-# Device nodes auto_devices binds at spawn time.
-AUTO_DEVICE_GLOBS: tuple[str, ...] = ("/dev/ttyACM*", "/dev/ttyUSB*")
+# Globs auto_devices binds at spawn time, and what kind of path they may match.
+DEFAULT_AUTO_GLOBS: tuple[str, ...] = ("/dev/ttyACM*", "/dev/ttyUSB*")
+AUTO_GLOB_KINDS: tuple[str, ...] = ("device", "any")
 # terminal.home_mode is a core setting; core bridges it to this env name and
 # hermes_constants.get_subprocess_home reads it. The spellings that
 # get_subprocess_home treats as "profile".
@@ -216,11 +219,17 @@ def resolve_profile(name: str) -> Profile:
 
 @dataclass(frozen=True)
 class BindMount:
-    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox."""
+    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox.
+
+    *auto* marks a bind that auto_devices produced from a glob rather than one
+    the operator wrote: it is a convenience, so a source the backend would
+    refuse is skipped with a warning instead of failing the whole spawn.
+    """
 
     src: str
     dest: str
     readonly: bool = True
+    auto: bool = False
 
 
 @dataclass(frozen=True)
@@ -243,6 +252,10 @@ class BubblewrapConfig:
     home_default_deny: str = bubblewrap_home.DENY_DOT
     # Operator-trusted mode: what binds and home_allow name is shown, not hidden.
     trust_operator: bool = False
+    # auto_devices: the globs bound at each spawn, and whether they may match a
+    # path that is not a device node ("any").
+    auto_globs: tuple[str, ...] = DEFAULT_AUTO_GLOBS
+    auto_globs_kind: str = "device"
 
 
 def _setting_name(key: str) -> str:
@@ -335,29 +348,52 @@ def _parse_bool(key: str, raw: object, default: bool) -> bool:
     raise ValueError(f"{_setting_name(key)} must be true or false, got {raw!r}")
 
 
-def auto_device_binds(binds: Iterable[BindMount]) -> tuple[BindMount, ...]:
-    """BindMounts for the serial devices present now, minus the ones already bound.
+def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
+                    kind: str = "device") -> tuple[BindMount, ...]:
+    """BindMounts for the host paths the globs match now, minus the ones already bound.
 
     Read at every config load, which the backend does per spawn: a board plugged
     in after startup is picked up by the next command, and one unplugged simply
-    stops being bound. Device nodes only; a glob that matches nothing adds
-    nothing.
+    stops being bound. *patterns* is the operator's auto_globs setting. Under
+    kind="device" only character and block nodes are taken, which keeps a stale
+    symlink or a directory out of the mount list; kind="any" also takes regular
+    files, directories and sockets, for a tool that needs a path of its own.
+    A glob that matches nothing adds nothing. A match whose real path is
+    already bound (explicitly or by an earlier pattern) is skipped: a by-id
+    symlink resolves to the node, which is what the tool opens anyway, and the
+    alias path itself has no parent inside the sandbox's fresh /dev.
     """
     covered = {os.path.realpath(bind.src) for bind in binds}
+    covered |= {os.path.realpath(bind.dest) for bind in binds}
     found: list[BindMount] = []
-    for pattern in AUTO_DEVICE_GLOBS:
-        for path in sorted(glob.glob(pattern)):
+    for pattern in patterns:
+        for matched in sorted(glob.glob(pattern)):
             try:
-                mode = os.stat(path).st_mode
+                mode = os.stat(matched).st_mode
             except OSError:
                 continue
-            if not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+            if stat.S_ISDIR(mode):
+                # A pattern such as /home/* would otherwise put whole trees in
+                # the mount list; a directory named in binds still can be bound.
+                logger.warning(
+                    "%s pattern %s matched the directory %s, which is not auto-bound: name it in binds instead",
+                    _setting_name(SETTING_AUTO_GLOBS), pattern, matched,
+                )
                 continue
-            real = os.path.realpath(path)
+            if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+                continue
+            real = os.path.realpath(matched)
             if real in covered:
+                # e.g. /dev/serial/by-id/usb-... resolving to /dev/ttyACM0 that
+                # an earlier pattern already bound: the node is what the tool
+                # ends up opening, and the alias path does not exist inside the
+                # sandbox's fresh /dev (its parent would have to be created).
+                logger.debug(
+                    "auto_globs: %s resolves to %s, already bound", matched, real,
+                )
                 continue
             covered.add(real)
-            found.append(BindMount(src=real, dest=path, readonly=False))
+            found.append(BindMount(src=real, dest=matched, readonly=False, auto=True))
     return tuple(found)
 
 
@@ -372,8 +408,12 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
     settings = settings or {}
     profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
     binds = _parse_binds(settings.get(SETTING_BINDS))
+    # An explicit empty list means "no auto binds"; an unset key means the default.
+    raw_globs = settings.get(SETTING_AUTO_GLOBS)
+    auto_globs = _parse_string_list(SETTING_AUTO_GLOBS, raw_globs) if raw_globs is not None else DEFAULT_AUTO_GLOBS
+    auto_kind = _parse_choice(SETTING_AUTO_GLOBS_KIND, settings.get(SETTING_AUTO_GLOBS_KIND), AUTO_GLOB_KINDS, "device")
     if _parse_bool(SETTING_AUTO_DEVICES, settings.get(SETTING_AUTO_DEVICES), True):
-        binds += auto_device_binds(binds)
+        binds += auto_glob_binds(binds, auto_globs, auto_kind)
     trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
     return BubblewrapConfig(
         profile=profile,
@@ -389,6 +429,8 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
             (bubblewrap_home.DENY_DOT, bubblewrap_home.DENY_ALL), bubblewrap_home.DENY_DOT,
         ),
         trust_operator=trust_operator,
+        auto_globs=tuple(auto_globs),
+        auto_globs_kind=auto_kind,
     )
 
 
@@ -2060,6 +2102,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         nothing the root bind does not.
         """
         writable = self._writable
+        skipped: list[BindMount] = []
         for bind in self._config.binds:
             if bind.readonly:
                 continue
@@ -2079,6 +2122,13 @@ class BubblewrapEnvironment(LocalEnvironment):
                     f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
                     "writable inside the sandbox"
                 )
+            if bind.auto:
+                logger.warning(
+                    "bubblewrap: not auto-binding %s (%s matched it): %s",
+                    bind.src, _setting_name(SETTING_AUTO_GLOBS), problem,
+                )
+                skipped.append(bind)
+                continue
             raise ValueError(
                 f"plugins.entries.bubblewrap-yuno.settings.binds entry {bind.src} -> {bind.dest} is read-write "
                 f"and {problem} with the bubblewrap backend: a command could swap the "
@@ -2087,6 +2137,11 @@ class BubblewrapEnvironment(LocalEnvironment):
                 "read-write bind source or the profile home, with no symlink on the "
                 "way: bound at its own path the source is a mount point, which no "
                 "command can rename or move from any path; or make it read-only."
+            )
+        if skipped:
+            self._config = replace(
+                self._config,
+                binds=tuple(bind for bind in self._config.binds if bind not in skipped),
             )
 
     def _check_absent_denied_paths(self) -> None:
