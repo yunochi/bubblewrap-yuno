@@ -669,13 +669,15 @@ def bind_mount_flag(bind: "BindMount") -> str:
     mount, and the kernel refuses to open a device node on a nodev mount with
     EACCES: /dev/ttyACM0 would show up at its path, list as crw-rw-rw-, and
     fail on open. ``--dev-bind`` keeps device access, and has no read-only
-    form, so a read-only device is remounted read-only right after it mounts.
+    form. A read-only mount cannot enforce read-only device I/O.
     """
     try:
         mode = os.stat(bind.src).st_mode
     except OSError:
         mode = 0
     if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        if bind.readonly:
+            raise ValueError(f"Read-only device bind {bind.src} is unsupported: omit the bind or set readonly: false to grant device control.")
         return "--dev-bind"
     return "--ro-bind" if bind.readonly else "--bind"
 
@@ -1187,14 +1189,6 @@ def build_bwrap_args(
         ("--bind-try" if profile.writable_cwd else "--ro-bind-try", initial_cwd, initial_cwd),
     ]
     mounts += [(bind_mount_flag(bind), bind.src, bind.dest) for bind in binds]
-    # --dev-bind has no read-only form: a read-only device bind is mounted by
-    # it and then remounted read-only, after every operator bind has landed.
-    remount_ro: list[str] = [
-        token
-        for bind in binds
-        if bind.readonly and bind_mount_flag(bind) == "--dev-bind"
-        for token in ("--remount-ro", bind.dest)
-    ]
     writable = [(initial_cwd, initial_cwd)] if profile.writable_cwd else []
     writable += [(bind.src, bind.dest) for bind in binds if not bind.readonly]
     mount_points = [initial_cwd, *(bind.dest for bind in binds)]
@@ -1216,7 +1210,6 @@ def build_bwrap_args(
     if home_root is None:
         for mount in mounts:
             argv += mount
-        argv += remount_ro
         # Pin the parents of the hidden paths that sit inside a writable bind
         # (see ancestor_pin_args) after those binds, so the pins land on top
         # of them, and before the overlays, so the overlays land on the pins.
@@ -1264,7 +1257,6 @@ def build_bwrap_args(
         for mount in mounts:
             if not in_home(mount[2]):
                 argv += mount
-        argv += remount_ro
         argv += bubblewrap_home.home_layout_args(
             root,
             units,
