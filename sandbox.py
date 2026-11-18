@@ -528,19 +528,68 @@ def sensitive_paths(home: str, hermes_home: str, extra: Sequence[str] = ()) -> t
     )
 
 
-def empty_file_path(state_dir: str) -> str:
-    """Host path of the zero-length file bound over sensitive files.
+EMPTY_FILE_DIR_NAME = "hermes-bwrap-empty"
 
-    It sits beside the state dir, not inside it: the state dir is bound
-    read-write into every spawn, so a file kept there could be rewritten
-    from inside the sandbox and would then show at the hidden paths. That
-    holds only while the parent of the state dir lies outside every
-    writable bind, since bwrap follows a symlink put in the file's place
-    when it resolves the bind source; BubblewrapEnvironment therefore
-    refuses a sandbox dir inside the cwd or a read-write operator bind
-    unless a hidden path covers it (_check_sandbox_root).
+
+def empty_file_dir() -> str | None:
+    """Host dir holding the zero-length file bound over hidden files.
+
+    It must lie outside every path a sandbox can write: the empty file is a
+    mount source, and bwrap follows a symlink found in its place, so a
+    directory a command can write to would let it point the source at a
+    secret and show it at the hidden path on the next spawn. The per-user
+    runtime dir is not bound into any sandbox and is not shared with other
+    users, so it serves; without one the caller falls back to the state dir
+    (see empty_file_path).
     """
-    return state_dir.rstrip(os.sep) + ".empty"
+    for base in (os.environ.get("XDG_RUNTIME_DIR", ""), f"/run/user/{os.getuid()}"):
+        if not base or not os.path.isdir(base):
+            continue
+        path = os.path.join(base, EMPTY_FILE_DIR_NAME)
+        try:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        except OSError:
+            continue
+        return path
+    return None
+
+
+def empty_file_path(state_dir: str) -> str:
+    """Host path of the zero-length file bound over sensitive files, created empty.
+
+    A file at the per-user runtime dir, outside every bind a sandbox gets
+    and outside the state dir, so nothing inside a sandbox can reach it to
+    replace it with a symlink to a secret. Without a runtime dir it falls
+    back to the state dir's sibling (the old layout), which is only safe
+    while that directory stays outside every writable bind — warn and let
+    _check_sandbox_root cover the rest.
+    """
+    directory = empty_file_dir()
+    if directory is None:
+        logger.warning(
+            "bubblewrap: no per-user runtime dir (XDG_RUNTIME_DIR or /run/user/%d), so the empty file bound "
+            "over hidden files sits beside the state dir; a command that can write that directory could "
+            "replace it with a link to a secret.", os.getuid(),
+        )
+        path = state_dir.rstrip(os.sep) + ".empty"
+    else:
+        path = os.path.join(directory, os.path.basename(state_dir.rstrip(os.sep)) + ".empty")
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        st = None
+    if st is not None and not stat.S_ISREG(st.st_mode):
+        # A symlink or a directory in its place: bwrap would follow the
+        # source, so it goes before the file is made again.
+        os.unlink(path)
+        st = None
+    if st is None:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+        os.chmod(path, 0o400)
+    elif st.st_size:
+        os.chmod(path, 0o600)
+        os.truncate(path, 0)
+        os.chmod(path, 0o400)
     return path
 
 
@@ -1658,7 +1707,6 @@ class BubblewrapEnvironment(LocalEnvironment):
         # Read-only and outside the state dir: nothing in a sandbox can
         # write to what shows at the hidden file paths.
         self._empty_file = empty_file_path(self._state_dir)
-        os.close(os.open(self._empty_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400))
         try:
             self._make_private_scratch()
         except BaseException:
