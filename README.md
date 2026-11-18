@@ -12,7 +12,7 @@ pin `e7a218f26db88426ab3e7376f0e000b6e356f5e7`. 업스트림 README는
 | # | 변경 | 이유 |
 |---|---|---|
 | 1 | 장치 노드 바인드는 `--dev-bind` (`readonly: true`면 거부) | `--bind`는 마운트에 `nodev`를 남기고, 커널이 nodev 마운트의 장치 노드 open을 `EACCES`로 거부한다. `/dev/ttyACM0`이 0666으로 보이는데도 열리지 않던 원인 |
-| 2 | `auto_bind_globs` + `auto_bind_globs_type` (기본: 빈 목록) | 스폰 시점에 지정한 글롭이 매칭하는 경로를 read-write로 자동 바인드. **목록 자체가 스위치**라 기본값은 "아무것도 안 함". `type: any`(기본)면 매칭된 것 전부(장치·파일·소켓·디렉터리), `device`면 문자/블록 장치 노드만. 이미 `binds`에 있는 경로는 중복되지 않는다 |
+| 2 | `auto_bind_globs` + `auto_bind_globs_type` (기본: 빈 목록) | 터미널 환경 생성 시 지정한 글롭이 매칭하는 경로를 read-write로 자동 바인드. **목록 자체가 스위치**라 기본값은 "아무것도 안 함". `type: any`(기본)면 매칭된 것 전부(장치·파일·소켓·디렉터리), `device`면 문자/블록 장치 노드만. 이미 `binds`에 있는 경로는 중복되지 않는다 |
 | 3 | `trust_operator` (기본 false) | 켜면 `binds`/`home_allow`에 적은 경로가 숨김 집합을 이긴다. 공식 플러그인은 `~/.hermes`, `.ssh` 등을 설정해도 조용히 무시한다 |
 | 4 | 숨김용 빈 파일을 per-user 런타임 디렉터리로 이동 | 기존 `<state_dir>.empty`는 `HERMES_HOME` 옆이라, 그 디렉터리가 쓰기 가능해지면(=`trust_operator` + `~/.hermes` 바인드) 샌드박스 안 명령이 빈 파일을 시크릿 심링크로 바꿔치기할 수 있었다 |
 
@@ -28,13 +28,10 @@ pin `e7a218f26db88426ab3e7376f0e000b6e356f5e7`. 업스트림 README는
 ```bash
 git clone <이 레포 URL> ~/src/bubblewrap-yuno
 ~/src/bubblewrap-yuno/install.sh
-hermes config set terminal.backend bubblewrap-yuno     # 실제로 켜기
 ```
 
 `install.sh`는 플러그인 디렉터리를 `$HERMES_HOME/plugins/bubblewrap-yuno`로 복사하고
 `hermes plugins enable bubblewrap-yuno`로 활성화만 한다. 신규 설치와 재설치 모두 장치·경로 규칙이나 리소스 제한을 설정하거나 지우지 않는다.
-`terminal.backend`는 **일부러 건드리지 않는다** — 켜는 순간 `~/.hermes`가 샌드박스에서
-사라져서, 설정이 잘못됐을 때 CLI로 되돌리기 어려워지기 때문.
 
 ### Hermes 플러그인 설치 명령으로
 
@@ -45,52 +42,74 @@ hermes plugins enable bubblewrap-yuno
 
 ## 설정
 
-`config.yaml`은 에이전트가 직접 쓸 수 없으니 항상 CLI로:
+아래는 `$HERMES_HOME/config.yaml`에 넣을 펌웨어 개발용 예시다. 기존 `terminal`과 `plugins.entries`에 필요한 항목만 합친다. `/home/user/work` 두 곳은 미리 만든 작업 폴더의 절대 경로로 바꾼다.
 
-```bash
-S=plugins.entries.bubblewrap-yuno.settings
-hermes config set $S.profile network          # restricted | workspace | network
-hermes config set $S.auto_bind_globs '["/dev/ttyACM*","/dev/ttyUSB*","/dev/bus/usb/*/*"]'
-hermes config set $S.auto_bind_globs_type any      # any(기본) | device
-# by-id 심링크는 노드로 해석되므로, 노드를 바인드하면 도구가 여는 경로는 확보된다
-# (`/dev/serial/by-id/...` 경로 자체는 샌드박스의 새 /dev에 부모가 없어 바인드하지 않는다)
-hermes config set $S.trust_operator false     # 필요할 때만 true
+```yaml
+terminal:
+  backend: bubblewrap-yuno
+  cwd: /home/user/work
 
-# 경로는 각자 환경에 맞게 (여기서는 홈 아래 work, ~/.espressif)
-hermes config set $S.binds "[{\"src\":\"$HOME/work\",\"readonly\":false},{\"src\":\"$HOME/.espressif\",\"readonly\":true}]"
-hermes config set $S.home_allow '[".ssh"]'    # trust_operator=true일 때만 의미 있음
+plugins:
+  entries:
+    bubblewrap-yuno:
+      settings:
+        profile: network
+        trust_operator: true
+        home_allow: [".espressif", ".hermes"]
+        binds:
+          - src: /home/user/work
+            readonly: false
+        auto_bind_globs_type: device
+        auto_bind_globs: ["/dev/ttyACM*", "/dev/ttyUSB*"]
+
+        # 펌웨어 빌드용 예시: 0은 해당 제한을 해제한다.
+        memory_mb: 0
+        cpu_seconds: 0
+        max_procs: 0
 ```
 
-재설치는 기존 `binds`를 보존한다. 예전 설정이라면 다른 항목은 유지하고 `~/.espressif` 항목만 `readonly: true`로 바꾼다. 장치 자체를 제어하면 안 되는 작업에서는 해당 장치 바인드와 자동 매칭을 빼야 한다.
+### 작업 디렉터리와 쓰기 범위
 
-`~/.espressif` 같은 경로를 바인드하면 IDF 툴체인(`tools/python/v6.1/venv/bin/esptool`,
-`v6.1/esp-idf`)을 샌드박스 안에서 그대로 쓸 수 있다.
+`terminal.cwd`는 프로젝트를 지정하지 않은 채팅의 기본 작업 폴더다. `.`은 대화의 프로젝트가 아니라 Hermes 프로세스의 현재 위치를 뜻하므로, 게이트웨이 실행 위치에 따라 홈이 쓰기 범위가 될 수 있다.
 
-### 선택: 빌드용 리소스 제한 해제
+코딩 세션은 프로젝트 폴더에서 `hermes --tui --in .` 또는 `hermes --cli --in .`으로 시작한다. `workspace`와 `network` 프로필에서는 선택한 프로젝트가 쓰기 가능한 작업 폴더다. 세션 안에서 `cd`해도 쓰기 권한은 바뀌지 않는다. 예시의 `binds`는 프로젝트를 옮겨도 공용 스크래치인 `~/work`를 계속 쓸 수 있게 한다.
 
-기본 제한을 유지하려면 아무 설정도 하지 않는다. 기존 설치에서 값을 `0`으로 지정했다면 재설치해도 그대로다. 제한 해제가 필요한 항목만 선택해서 실행한다.
+### 홈 항목과 추가 바인드
 
-```bash
-S=plugins.entries.bubblewrap-yuno.settings
-hermes config set $S.memory_mb 0              # 0 = 제한 없음
-hermes config set $S.cpu_seconds 0
-hermes config set $S.max_procs 0
-```
+| 설정 | 용도 |
+|---|---|
+| `home_allow` | 샌드박스 홈에 원래 이름으로 보여 줄 항목. `.espressif` 같은 최상위 숨김 디렉터리나 `.config/nvim` 같은 허용 단위를 읽기 전용으로 노출한다. |
+| `binds` | 특정 파일·디렉터리·장치를 직접 마운트한다. `src`는 호스트 경로, `dest`는 샌드박스 경로(생략 시 `src`), `readonly`는 생략 시 `true`다. |
+| `trust_operator` | `true` 로 설정할 경우 업스트림 플러그인의  `~/.hermes`, `.ssh` 등을 설정해도 무시하는 동작을 비활성화 한다. |
+
+
+- `trust_operator: true`로 상위 경로를 허용하면 하위 경로를 `hide`에 넣어도 숨겨지지 않는다.
+- 상위 디렉터리가 RO여도 `$TMPDIR`처럼 별도로 RW 마운트한 하위 경로에는 쓸 수 있다.
+
+### 장치 허용
+
+
+자동 목록은 기본적으로 비어 있다. 일치하는 장치는 RW로 바인드한다. `device`는 문자·블록 장치만 받지만 기본 타입 `any`는 파일·소켓·디렉터리도 받는다. `/dev/bus/usb/*/*`는 시리얼 포트에 한정되지 않으므로 직접 USB 접근이 필요할 때만 추가한다. 자동으로 추가된 소스도 `trust_operator`의 신뢰 경로에 포함된다.
+
+장치 하나만 허용하려면 글롭 대신 `binds` 목록에 `{"src":"/dev/ttyACM0","readonly":false}`를 추가한다. 문자·블록 장치에서는 `readonly: true`와 생략 모두 오류다. 파일시스템을 RO로 마운트해도 장치 제어까지 막을 수 없기 때문이다.
+
 
 ## 확인
 
 ```bash
-python3 -c "import os; fd=os.open('/dev/ttyACM0', os.O_RDWR|os.O_NOCTTY|os.O_NONBLOCK); print('ok', os.isatty(fd))"
-awk '$5=="/dev/ttyACM0"' /proc/self/mountinfo      # rw,nosuid  (nodev가 없어야 정상)
-esptool version                                    # ~/.espressif 바인드 시
+pwd -P
+findmnt -T . -o TARGET,VFS-OPTIONS
+findmnt -T "$HOME/.espressif" -o TARGET,VFS-OPTIONS
+findmnt -M /dev/ttyACM0 -o TARGET,VFS-OPTIONS   # 장치를 허용했다면 rw, nodev 없음
 ```
 
-보드에 실제로 접근하는 확인(`esptool chip-id`, `idf.py monitor`)은 DTR/RTS를 건드려
-**대상을 리셋**한다. 다른 모니터가 열려 있으면 먼저 확인할 것.
+설정과 글롭은 터미널 환경을 새로 만들 때 읽는다. 기존 세션은 환경을 재사용할 수 있으므로 변경 후에는 새 세션의 터미널에서 위 명령으로 확인한다.
 
-## 보안 경고 — `trust_operator`
+## 보안 경고
 
-켜면 `binds`/`home_allow`에 적은 경로가 숨김 규칙을 이긴다. 특히 `~/.hermes`를
+**Unix 소켓을 `readonly: true`로 바인드해도 소켓으로 보내는 요청은 읽기 전용이 되지 않는다.** 샌드박스에서 소켓에 연결할 수 있다면 어떤 작업을 요청할 수 있는지는 마운트 옵션이 아니라 그 서비스를 제공하는 쪽의 권한 정책이 결정한다. 예를 들어 root로 동작하는 Docker 데몬의 소켓(`/var/run/docker.sock`)에 제한 없이 접근할 수 있으면 사실상 호스트 관리자 권한을 얻는다. 소켓을 바인드할 때는 해당 서비스의 제어 권한까지 허용하려는 것인지 확인한다.
+
+`trust_operator: true`이면 `binds`/`home_allow`에 적은 경로가 숨김 규칙을 이긴다. 특히 `~/.hermes`를
 read-write로 바인드하면 샌드박스 안 명령이 **이 플러그인 코드와 `config.yaml`을 고칠 수
 있고**, 그 수정은 다음 스폰에서 호스트 권한으로 실행된다. 즉 샌드박스 경계 하나를
 없애는 것과 같다. 기본값은 `false`이고, 필요할 때만 켠다.
