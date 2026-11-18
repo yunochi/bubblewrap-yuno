@@ -12,7 +12,7 @@ pin `e7a218f26db88426ab3e7376f0e000b6e356f5e7`. 업스트림 README는
 | # | 변경 | 이유 |
 |---|---|---|
 | 1 | 장치 노드 바인드는 `--dev-bind` (read-only면 뒤에 `--remount-ro`) | `--bind`는 마운트에 `nodev`를 남기고, 커널이 nodev 마운트의 장치 노드 open을 `EACCES`로 거부한다. `/dev/ttyACM0`이 0666으로 보이는데도 열리지 않던 원인 |
-| 2 | `auto_bind_globs` + `auto_bind_globs_type` (기본: 빈 목록) | 스폰 시점에 지정한 글롭이 매칭하는 경로를 read-write로 자동 바인드. **목록 자체가 스위치**라 기본값은 "아무것도 안 함". `type: any`(기본)면 장치·파일·소켓, `device`면 장치 노드만. 디렉터리는 자동 바인드하지 않고, 이미 `binds`에 있는 경로는 중복되지 않는다 |
+| 2 | `auto_bind_globs` + `auto_bind_globs_type` (기본: 빈 목록) | 스폰 시점에 지정한 글롭이 매칭하는 경로를 read-write로 자동 바인드. **목록 자체가 스위치**라 기본값은 "아무것도 안 함". `type: any`(기본)면 매칭된 것 전부(장치·파일·소켓·디렉터리), `device`면 문자/블록 장치 노드만. 이미 `binds`에 있는 경로는 중복되지 않는다 |
 | 3 | `trust_operator` (기본 false) | 켜면 `binds`/`home_allow`에 적은 경로가 숨김 집합을 이긴다. 공식 플러그인은 `~/.hermes`, `.ssh` 등을 설정해도 조용히 무시한다 |
 | 4 | 숨김용 빈 파일을 per-user 런타임 디렉터리로 이동 | 기존 `<state_dir>.empty`는 `HERMES_HOME` 옆이라, 그 디렉터리가 쓰기 가능해지면(=`trust_operator` + `~/.hermes` 바인드) 샌드박스 안 명령이 빈 파일을 시크릿 심링크로 바꿔치기할 수 있었다 |
 

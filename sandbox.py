@@ -353,10 +353,10 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
 
     Read at every config load, which the backend does per spawn: a board plugged
     in after startup is picked up by the next command, and one unplugged simply
-    stops being bound. *patterns* is the operator's auto_bind_globs setting. Under
-    kind="device" only character and block nodes are taken, which keeps a stale
-    symlink or a directory out of the mount list; kind="any" also takes regular
-    files, directories and sockets, for a tool that needs a path of its own.
+    stops being bound. *patterns* is the operator's auto_bind_globs setting.
+    kind="device" takes only character and block nodes, which keeps a stale
+    symlink or a file out of the mount list; kind="any" takes whatever matched,
+    directories included, because an operator who names a pattern means it.
     A glob that matches nothing adds nothing. A match whose real path is
     already bound (explicitly or by an earlier pattern) is skipped: a by-id
     symlink resolves to the node, which is what the tool opens anyway, and the
@@ -371,16 +371,15 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                 mode = os.stat(matched).st_mode
             except OSError:
                 continue
-            if stat.S_ISDIR(mode):
-                # A pattern such as /home/* would otherwise put whole trees in
-                # the mount list; a directory named in binds still can be bound.
-                logger.warning(
-                    "%s pattern %s matched the directory %s, which is not auto-bound: name it in binds instead",
-                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
-                )
-                continue
             if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
                 continue
+            if stat.S_ISDIR(mode):
+                # A directory pulls its whole tree in read-write; say so once per
+                # spawn instead of refusing it, since the operator named the glob.
+                logger.warning(
+                    "%s pattern %s auto-binds the directory %s read-write", 
+                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
+                )
             real = os.path.realpath(matched)
             if real in covered:
                 # e.g. /dev/serial/by-id/usb-... resolving to /dev/ttyACM0 that
@@ -1818,6 +1817,12 @@ class BubblewrapEnvironment(LocalEnvironment):
         kept: list[BindMount] = []
         for bind in self._config.binds:
             label = f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest}"
+            if bind.auto and self._config.trust_operator:
+                # Same call as an operator-written bind: trust_operator means the
+                # operator's own patterns are taken as they are, even where the
+                # guard would call a read-write source swappable.
+                kept.append(bind)
+                continue
             real, reason = bubblewrap_binds.bind_refusal(
                 bind.src, guard, kind=bubblewrap_binds.ANY, dest=bind.dest, hidden_rules=False,
             )
@@ -2124,6 +2129,14 @@ class BubblewrapEnvironment(LocalEnvironment):
                     f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
                     "writable inside the sandbox"
                 )
+            if bind.auto and self._config.trust_operator:
+                # The operator asked for this path through a glob and trust is on:
+                # the same call they make for binds and home_allow.
+                logger.warning(
+                    "bubblewrap: auto-binding %s although %s (%s is on)",
+                    bind.src, problem, _setting_name(SETTING_TRUST_OPERATOR),
+                )
+                continue
             if bind.auto:
                 logger.warning(
                     "bubblewrap: not auto-binding %s (%s matched it): %s",
