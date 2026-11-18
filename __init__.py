@@ -5,7 +5,7 @@
 Fork of the official plugin with two hardware-facing changes: binds whose
 source is a device node mount with --dev-bind (a plain --bind lands with nodev
 set, and the kernel refuses to open a device node on a nodev mount), and the
-auto_devices setting binds /dev/ttyACM* and /dev/ttyUSB* present at spawn.
+auto_bind_globs setting binds whatever its patterns match at spawn time.
 
 Every ``terminal`` and ``execute_code`` command runs in its own bwrap sandbox on
 this machine, at the same paths: read-only root, writable working directory,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 BACKEND_NAME = "bubblewrap-yuno"
 PROMPT_SECTION_ID = "bubblewrap-yuno-sandbox"
-SETTING_KEYS = ("profile", "binds", "auto_devices", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
+SETTING_KEYS = ("profile", "binds", "auto_bind_globs", "auto_bind_globs_type", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
 
 _PROFILE_CHOICES = (
     ("restricted", "restricted - read-only working directory, no network"),
