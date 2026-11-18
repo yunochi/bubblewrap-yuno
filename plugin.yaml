@@ -1,19 +1,20 @@
-name: bubblewrap
-label: Bubblewrap
-version: 1.5.1
+name: bubblewrap-yuno
+label: Bubblewrap (yuno)
+version: 1.5.1+yuno.1
 manifest_version: 2
 kind: backend
-author: NousResearch
+author: NousResearch (fork maintained by yunochi)
 license: MIT
 homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/bubblewrap
 description: >
-  Bubblewrap terminal backend for Linux: every terminal and execute_code
-  command runs in its own bwrap sandbox on this machine, at the same paths.
-  Read-only root, writable working directory (per profile), the dot entries
-  of the home directory (credential stores always) and the Hermes home hidden,
-  a scratch directory per sandbox, private /tmp and /proc,
-  agent and docker sockets masked, and memory, CPU and process limits.
-  Select it with `hermes config set terminal.backend bubblewrap`.
+  Local fork of the official bubblewrap backend, kept at
+  https://github.com/NousResearch/hermes-official-plugins/tree/main/bubblewrap.
+  Same sandbox as bubblewrap, plus changes for hardware work: a bind whose
+  source is a device node is mounted with --dev-bind (a plain --bind lands with
+  nodev set, and the kernel refuses to open a device node on a nodev mount with
+  EACCES, so /dev/ttyACM0 would be visible but unusable), and auto_devices binds
+  /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time.
+  Select it with `hermes config set terminal.backend bubblewrap-yuno`.
 requires_hermes: ">=0.22.6"
 platforms: [linux]
 tags: [terminal, sandbox, bubblewrap, linux]
@@ -26,6 +27,11 @@ config_schema:
     default: network
     label: Profile
     description: "restricted: read-only working directory, no network. workspace: writable working directory, no network. network: writable working directory and the host network."
+  auto_devices:
+    type: bool
+    default: true
+    label: Auto-bind serial devices
+    description: "Bind every /dev/ttyACM* and /dev/ttyUSB* present at spawn time read-write into the sandbox with --dev-bind, so a board that was plugged in after startup is usable. Already-listed binds are not duplicated."
   binds:
     type: list
     default: []

@@ -2,7 +2,7 @@
 
 Every terminal command under ``terminal.backend: bubblewrap`` runs inside a
 bwrap sandbox. This module builds the bwrap argv prefix from the plugin's
-settings (``plugins.entries.bubblewrap.settings.*``) and construction-time
+settings (``plugins.entries.bubblewrap-yuno.settings.*``) and construction-time
 inputs only. Nothing produced inside a sandbox (the
 tracked cwd, the shell snapshot, command output) feeds a mount or a flag
 argument; the tracked cwd is used for ``--chdir`` alone.
@@ -95,6 +95,7 @@ since raising a hard limit needs CAP_SYS_RESOURCE.
 from __future__ import annotations
 
 import contextlib
+import glob
 import hashlib
 import json
 import logging
@@ -104,6 +105,7 @@ import resource
 import shlex
 import shutil
 import signal
+import stat
 import sys
 import subprocess
 import threading
@@ -163,16 +165,19 @@ DEFAULT_MEMORY_MB = 256
 DEFAULT_CPU_SECONDS = 30
 DEFAULT_MAX_PROCS = 256
 
-# The plugin's settings keys (plugins.entries.bubblewrap.settings.<key>).
+# The plugin's settings keys (plugins.entries.bubblewrap-yuno.settings.<key>).
 SETTING_PROFILE = "profile"
 SETTING_BINDS = "binds"
+SETTING_AUTO_DEVICES = "auto_devices"
 SETTING_MEMORY_MB = "memory_mb"
 SETTING_CPU_SECONDS = "cpu_seconds"
 SETTING_MAX_PROCS = "max_procs"
 SETTING_HOME_ALLOW = "home_allow"
 SETTING_HIDE = "hide"
 SETTING_HOME_DEFAULT_DENY = "home_default_deny"
-SETTINGS_PREFIX = "plugins.entries.bubblewrap.settings"
+SETTINGS_PREFIX = "plugins.entries.bubblewrap-yuno.settings"
+# Device nodes auto_devices binds at spawn time.
+AUTO_DEVICE_GLOBS: tuple[str, ...] = ("/dev/ttyACM*", "/dev/ttyUSB*")
 # terminal.home_mode is a core setting; core bridges it to this env name and
 # hermes_constants.get_subprocess_home reads it. The spellings that
 # get_subprocess_home treats as "profile".
@@ -313,6 +318,46 @@ def _parse_choice(key: str, raw: object, choices: tuple[str, ...], default: str)
     return value
 
 
+def _parse_bool(key: str, raw: object, default: bool) -> bool:
+    """A bool setting; the spellings config files and the CLI produce are accepted."""
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{_setting_name(key)} must be true or false, got {raw!r}")
+
+
+def auto_device_binds(binds: Iterable[BindMount]) -> tuple[BindMount, ...]:
+    """BindMounts for the serial devices present now, minus the ones already bound.
+
+    Read at every config load, which the backend does per spawn: a board plugged
+    in after startup is picked up by the next command, and one unplugged simply
+    stops being bound. Device nodes only; a glob that matches nothing adds
+    nothing.
+    """
+    covered = {os.path.realpath(bind.src) for bind in binds}
+    found: list[BindMount] = []
+    for pattern in AUTO_DEVICE_GLOBS:
+        for path in sorted(glob.glob(pattern)):
+            try:
+                mode = os.stat(path).st_mode
+            except OSError:
+                continue
+            if not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+                continue
+            real = os.path.realpath(path)
+            if real in covered:
+                continue
+            covered.add(real)
+            found.append(BindMount(src=real, dest=path, readonly=False))
+    return tuple(found)
+
+
 def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mode: str = "") -> BubblewrapConfig:
     """Build the config from the plugin's settings mapping and terminal.home_mode.
 
@@ -323,9 +368,12 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
     """
     settings = settings or {}
     profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
+    binds = _parse_binds(settings.get(SETTING_BINDS))
+    if _parse_bool(SETTING_AUTO_DEVICES, settings.get(SETTING_AUTO_DEVICES), True):
+        binds += auto_device_binds(binds)
     return BubblewrapConfig(
         profile=profile,
-        binds=_parse_binds(settings.get(SETTING_BINDS)),
+        binds=binds,
         memory_mb=_parse_limit(SETTING_MEMORY_MB, settings.get(SETTING_MEMORY_MB), DEFAULT_MEMORY_MB),
         cpu_seconds=_parse_limit(SETTING_CPU_SECONDS, settings.get(SETTING_CPU_SECONDS), DEFAULT_CPU_SECONDS),
         max_procs=_parse_limit(SETTING_MAX_PROCS, settings.get(SETTING_MAX_PROCS), DEFAULT_MAX_PROCS),
@@ -421,6 +469,7 @@ def empty_file_path(state_dir: str) -> str:
     unless a hidden path covers it (_check_sandbox_root).
     """
     return state_dir.rstrip(os.sep) + ".empty"
+    return path
 
 
 def sensitive_overlay_args(hidden_paths: Sequence[str], state_dir: str) -> list[str]:
@@ -447,6 +496,24 @@ def sensitive_overlay_args(hidden_paths: Sequence[str], state_dir: str) -> list[
         elif os.path.exists(path):
             argv += ["--ro-bind", empty, path]
     return argv
+
+
+def bind_mount_flag(bind: "BindMount") -> str:
+    """The bwrap flag one operator bind goes in with.
+
+    A device node needs ``--dev-bind``. ``--bind`` leaves nodev set on the
+    mount, and the kernel refuses to open a device node on a nodev mount with
+    EACCES: /dev/ttyACM0 would show up at its path, list as crw-rw-rw-, and
+    fail on open. ``--dev-bind`` keeps device access, and has no read-only
+    form, so a read-only device is remounted read-only right after it mounts.
+    """
+    try:
+        mode = os.stat(bind.src).st_mode
+    except OSError:
+        mode = 0
+    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+        return "--dev-bind"
+    return "--ro-bind" if bind.readonly else "--bind"
 
 
 # Marks an argument the caller left out, where None already has a meaning.
@@ -675,17 +742,17 @@ def filter_binds(binds: tuple[BindMount, ...], hidden_paths: Sequence[str]) -> l
     for bind in binds:
         if is_sensitive_source(bind.src, hidden_paths):
             logger.warning(
-                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s: source is under a sensitive path",
+                "Ignoring %s entry %s: source is under a sensitive path", _setting_name(SETTING_BINDS),
                 bind.src,
             )
             continue
         hidden = hidden_path_under(bind.src, hidden_paths)
         if hidden is not None and not _same_host_path(bind.src, bind.dest):
             logger.warning(
-                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s -> %s: the source contains the "
+                "Ignoring %s entry %s -> %s: the source contains the "
                 "hidden path %s, which would be readable at the destination. Bind it at its "
                 "own path (dest equal to src) instead.",
-                bind.src, bind.dest, hidden,
+                _setting_name(SETTING_BINDS), bind.src, bind.dest, hidden,
             )
             continue
         kept.append(bind)
@@ -950,7 +1017,15 @@ def build_bwrap_args(
     mounts: list[tuple[str, str, str]] = [
         ("--bind-try" if profile.writable_cwd else "--ro-bind-try", initial_cwd, initial_cwd),
     ]
-    mounts += [("--ro-bind" if bind.readonly else "--bind", bind.src, bind.dest) for bind in binds]
+    mounts += [(bind_mount_flag(bind), bind.src, bind.dest) for bind in binds]
+    # --dev-bind has no read-only form: a read-only device bind is mounted by
+    # it and then remounted read-only, after every operator bind has landed.
+    remount_ro: list[str] = [
+        token
+        for bind in binds
+        if bind.readonly and bind_mount_flag(bind) == "--dev-bind"
+        for token in ("--remount-ro", bind.dest)
+    ]
     writable = [(initial_cwd, initial_cwd)] if profile.writable_cwd else []
     writable += [(bind.src, bind.dest) for bind in binds if not bind.readonly]
     mount_points = [initial_cwd, *(bind.dest for bind in binds)]
@@ -972,6 +1047,7 @@ def build_bwrap_args(
     if home_root is None:
         for mount in mounts:
             argv += mount
+        argv += remount_ro
         # Pin the parents of the hidden paths that sit inside a writable bind
         # (see ancestor_pin_args) after those binds, so the pins land on top
         # of them, and before the overlays, so the overlays land on the pins.
@@ -1019,6 +1095,7 @@ def build_bwrap_args(
         for mount in mounts:
             if not in_home(mount[2]):
                 argv += mount
+        argv += remount_ro
         argv += bubblewrap_home.home_layout_args(
             root,
             units,
@@ -1875,7 +1952,7 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "writable inside the sandbox"
                 )
             raise ValueError(
-                f"plugins.entries.bubblewrap.settings.binds entry {bind.src} -> {bind.dest} is read-write "
+                f"plugins.entries.bubblewrap-yuno.settings.binds entry {bind.src} -> {bind.dest} is read-write "
                 f"and {problem} with the bubblewrap backend: a command could swap the "
                 "source and choose the next spawn's mount. Bind it read-write only at "
                 "its own path (dest equal to src) directly under terminal.cwd, a "
@@ -1965,7 +2042,7 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "writable inside the sandbox with the bubblewrap backend: a command "
                     "could replace the empty file bound over hidden files. Set "
                     "terminal.sandbox_dir to a directory outside terminal.cwd and "
-                    "outside every read-write plugins.entries.bubblewrap.settings.binds source; the "
+                    "outside every read-write plugins.entries.bubblewrap-yuno.settings.binds source; the "
                     "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
                 )
         # Outside the hidden set the sandbox dir is hidden by a tmpfs on top
