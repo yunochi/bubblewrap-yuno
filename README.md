@@ -11,7 +11,7 @@ pin `e7a218f26db88426ab3e7376f0e000b6e356f5e7`. 업스트림 README는
 
 | # | 변경 | 이유 |
 |---|---|---|
-| 1 | 장치 노드 바인드는 `--dev-bind` (read-only면 뒤에 `--remount-ro`) | `--bind`는 마운트에 `nodev`를 남기고, 커널이 nodev 마운트의 장치 노드 open을 `EACCES`로 거부한다. `/dev/ttyACM0`이 0666으로 보이는데도 열리지 않던 원인 |
+| 1 | 장치 노드 바인드는 `--dev-bind` (`readonly: true`면 거부) | `--bind`는 마운트에 `nodev`를 남기고, 커널이 nodev 마운트의 장치 노드 open을 `EACCES`로 거부한다. `/dev/ttyACM0`이 0666으로 보이는데도 열리지 않던 원인 |
 | 2 | `auto_bind_globs` + `auto_bind_globs_type` (기본: 빈 목록) | 스폰 시점에 지정한 글롭이 매칭하는 경로를 read-write로 자동 바인드. **목록 자체가 스위치**라 기본값은 "아무것도 안 함". `type: any`(기본)면 매칭된 것 전부(장치·파일·소켓·디렉터리), `device`면 문자/블록 장치 노드만. 이미 `binds`에 있는 경로는 중복되지 않는다 |
 | 3 | `trust_operator` (기본 false) | 켜면 `binds`/`home_allow`에 적은 경로가 숨김 집합을 이긴다. 공식 플러그인은 `~/.hermes`, `.ssh` 등을 설정해도 조용히 무시한다 |
 | 4 | 숨김용 빈 파일을 per-user 런타임 디렉터리로 이동 | 기존 `<state_dir>.empty`는 `HERMES_HOME` 옆이라, 그 디렉터리가 쓰기 가능해지면(=`trust_operator` + `~/.hermes` 바인드) 샌드박스 안 명령이 빈 파일을 시크릿 심링크로 바꿔치기할 수 있었다 |
@@ -32,7 +32,7 @@ hermes config set terminal.backend bubblewrap-yuno     # 실제로 켜기
 ```
 
 `install.sh`는 플러그인 디렉터리를 `$HERMES_HOME/plugins/bubblewrap-yuno`로 복사하고
-`hermes plugins enable bubblewrap-yuno` + 아래 기본 설정을 적용한다.
+`hermes plugins enable bubblewrap-yuno`로 활성화만 한다. 신규 설치와 재설치 모두 장치·경로 규칙이나 리소스 제한을 설정하거나 지우지 않는다.
 `terminal.backend`는 **일부러 건드리지 않는다** — 켜는 순간 `~/.hermes`가 샌드박스에서
 사라져서, 설정이 잘못됐을 때 CLI로 되돌리기 어려워지기 때문.
 
@@ -55,16 +55,27 @@ hermes config set $S.auto_bind_globs_type any      # any(기본) | device
 # by-id 심링크는 노드로 해석되므로, 노드를 바인드하면 도구가 여는 경로는 확보된다
 # (`/dev/serial/by-id/...` 경로 자체는 샌드박스의 새 /dev에 부모가 없어 바인드하지 않는다)
 hermes config set $S.trust_operator false     # 필요할 때만 true
-hermes config set $S.memory_mb 0              # 0 = 제한 없음
-hermes config set $S.cpu_seconds 0
-hermes config set $S.max_procs 0
+
 # 경로는 각자 환경에 맞게 (여기서는 홈 아래 work, ~/.espressif)
-hermes config set $S.binds "[{\"src\":\"$HOME/work\",\"readonly\":false},{\"src\":\"$HOME/.espressif\",\"readonly\":false}]"
+hermes config set $S.binds "[{\"src\":\"$HOME/work\",\"readonly\":false},{\"src\":\"$HOME/.espressif\",\"readonly\":true}]"
 hermes config set $S.home_allow '[".ssh"]'    # trust_operator=true일 때만 의미 있음
 ```
 
+재설치는 기존 `binds`를 보존한다. 예전 설정이라면 다른 항목은 유지하고 `~/.espressif` 항목만 `readonly: true`로 바꾼다. 장치 자체를 제어하면 안 되는 작업에서는 해당 장치 바인드와 자동 매칭을 빼야 한다.
+
 `~/.espressif` 같은 경로를 바인드하면 IDF 툴체인(`tools/python/v6.1/venv/bin/esptool`,
 `v6.1/esp-idf`)을 샌드박스 안에서 그대로 쓸 수 있다.
+
+### 선택: 빌드용 리소스 제한 해제
+
+기본 제한을 유지하려면 아무 설정도 하지 않는다. 기존 설치에서 값을 `0`으로 지정했다면 재설치해도 그대로다. 제한 해제가 필요한 항목만 선택해서 실행한다.
+
+```bash
+S=plugins.entries.bubblewrap-yuno.settings
+hermes config set $S.memory_mb 0              # 0 = 제한 없음
+hermes config set $S.cpu_seconds 0
+hermes config set $S.max_procs 0
+```
 
 ## 확인
 
