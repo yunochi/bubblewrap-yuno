@@ -76,6 +76,11 @@ class BindGuard:
     home_root: str | None = None
     home_allow: tuple[str, ...] = ()
     home_default_deny: str = bubblewrap_home.DENY_DOT
+    # trust_operator: what the operator names is shown, so the hidden-path
+    # refusals below stand down, and a bind inside a trusted read-write bind
+    # (the scratch dir under a bound HERMES_HOME) is not refused as swappable.
+    trust_operator: bool = False
+    trusted: tuple[str, ...] = ()
 
     def home_hidden_unit(self, path: str) -> str | None:
         """The entry of HOME, off the allowlist and so hidden, that *path* lies in, else None."""
@@ -133,10 +138,12 @@ def _refusal(
     root = guard.writable_root(real)
     # A source bound at its own path directly under a writable root is a
     # mount point inside, and its parent is the root, also a mount point:
-    # no command can rename either, so the source cannot be swapped.
+    # no command can rename either, so the source cannot be swapped. Under
+    # trust_operator a writable root the operator named is accepted as is.
     if root is not None and not (dest == real and os.path.dirname(real) == root):
-        return f"{real} lies in {root}, which a sandbox can write to, so a command could swap it"
-    if not hidden_rules:
+        if not (guard.trust_operator and any(_is_within(root, trusted) for trusted in guard.trusted)):
+            return f"{real} lies in {root}, which a sandbox can write to, so a command could swap it"
+    if not hidden_rules or guard.trust_operator:
         return None
     for secret in guard.secret:
         if _is_within(real, secret):
