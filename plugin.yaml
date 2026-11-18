@@ -13,7 +13,7 @@ description: >
   source is a device node is mounted with --dev-bind (a plain --bind lands with
   nodev set, and the kernel refuses to open a device node on a nodev mount with
   EACCES, so /dev/ttyACM0 would be visible but unusable), auto_bind_globs binds
-  whatever patterns the operator sets on every spawn, and trust_operator
+  matching paths on every spawn, and trust_operator
   (off by default) which makes paths the operator names in binds/home_allow win
   over the hidden set instead of being silently dropped. The empty file bound
   over the hidden file paths now lives in the per-user runtime dir
@@ -41,7 +41,7 @@ config_schema:
     type: list
     default: []
     label: Auto-bind globs
-    description: "Glob patterns resolved on every spawn and bound read-write, for example [\"/dev/ttyACM*\", \"/dev/ttyUSB*\", \"/dev/bus/usb/*/*\"]. The list is the switch: empty (the default) binds nothing. Already-listed binds are not duplicated, and a pattern is re-read per spawn, so a board plugged in later is picked up."
+    description: "Read-write auto-bind patterns, e.g. [\"/dev/ttyACM*\", \"/dev/ttyUSB*\"]. All matches are re-evaluated and checked at each command launch; unsafe matches are skipped. Empty (the default) binds nothing."
   auto_bind_globs_type:
     type: str
     choices: [device, any]
