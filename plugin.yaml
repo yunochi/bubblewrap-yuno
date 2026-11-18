@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.7
+version: 1.5.1+yuno.8
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
