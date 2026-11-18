@@ -40,7 +40,8 @@ set_cfg_if_unset() {
     fi
 }
 
-set_cfg_if_unset auto_devices true
+set_cfg_if_unset auto_bind_globs '["/dev/ttyACM*","/dev/ttyUSB*"]'
+set_cfg_if_unset auto_bind_globs_type any
 set_cfg_if_unset trust_operator false
 set_cfg_if_unset memory_mb 0
 set_cfg_if_unset cpu_seconds 0

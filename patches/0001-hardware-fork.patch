@@ -1,6 +1,6 @@
 diff -ruN a/__init__.py b/__init__.py
---- a/__init__.py	2026-11-18 15:53:37.106049908 +0900
-+++ b/__init__.py	2026-11-18 15:53:37.107391687 +0900
+--- a/__init__.py	2026-11-18 16:03:56.681999141 +0900
++++ b/__init__.py	2026-11-18 16:03:56.683558894 +0900
 @@ -1,7 +1,11 @@
 -"""Bubblewrap terminal backend for Hermes Agent (Linux).
 +"""Bubblewrap terminal backend for Hermes Agent (Linux) — local fork by yuno.
@@ -12,7 +12,7 @@ diff -ruN a/__init__.py b/__init__.py
 +Fork of the official plugin with two hardware-facing changes: binds whose
 +source is a device node mount with --dev-bind (a plain --bind lands with nodev
 +set, and the kernel refuses to open a device node on a nodev mount), and the
-+auto_devices setting binds /dev/ttyACM* and /dev/ttyUSB* present at spawn.
++auto_bind_globs setting binds whatever its patterns match at spawn time.
  
  Every ``terminal`` and ``execute_code`` command runs in its own bwrap sandbox on
  this machine, at the same paths: read-only root, writable working directory,
@@ -25,7 +25,7 @@ diff -ruN a/__init__.py b/__init__.py
 -SETTING_KEYS = ("profile", "binds", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
 +BACKEND_NAME = "bubblewrap-yuno"
 +PROMPT_SECTION_ID = "bubblewrap-yuno-sandbox"
-+SETTING_KEYS = ("profile", "binds", "auto_devices", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
++SETTING_KEYS = ("profile", "binds", "auto_bind_globs", "auto_bind_globs_type", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
  
  _PROFILE_CHOICES = (
      ("restricted", "restricted - read-only working directory, no network"),
@@ -78,8 +78,8 @@ diff -ruN a/__init__.py b/__init__.py
  
  
 diff -ruN a/binds.py b/binds.py
---- a/binds.py	2026-11-18 15:53:37.105970587 +0900
-+++ b/binds.py	2026-11-18 15:53:37.107314626 +0900
+--- a/binds.py	2026-11-18 16:03:56.681900329 +0900
++++ b/binds.py	2026-11-18 16:03:56.683486793 +0900
 @@ -76,6 +76,11 @@
      home_root: str | None = None
      home_allow: tuple[str, ...] = ()
@@ -109,8 +109,8 @@ diff -ruN a/binds.py b/binds.py
      for secret in guard.secret:
          if _is_within(real, secret):
 diff -ruN a/home.py b/home.py
---- a/home.py	2026-11-18 15:53:37.106007997 +0900
-+++ b/home.py	2026-11-18 15:53:37.107350767 +0900
+--- a/home.py	2026-11-18 16:03:56.681955470 +0900
++++ b/home.py	2026-11-18 16:03:56.683523093 +0900
 @@ -199,8 +199,8 @@
      ".local/share/mime",
  )
@@ -123,15 +123,15 @@ diff -ruN a/home.py b/home.py
  DENY_ALL = "all"
  
 diff -ruN a/plugin.yaml b/plugin.yaml
---- a/plugin.yaml	2026-11-18 15:53:37.106081199 +0900
-+++ b/plugin.yaml	2026-11-18 15:53:37.107431648 +0900
+--- a/plugin.yaml	2026-11-18 16:03:56.682037571 +0900
++++ b/plugin.yaml	2026-11-18 16:03:56.683594764 +0900
 @@ -1,19 +1,25 @@
 -name: bubblewrap
 -label: Bubblewrap
 -version: 1.5.1
 +name: bubblewrap-yuno
 +label: Bubblewrap (yuno)
-+version: 1.5.1+yuno.4
++version: 1.5.1+yuno.5
  manifest_version: 2
  kind: backend
 -author: NousResearch
@@ -151,8 +151,8 @@ diff -ruN a/plugin.yaml b/plugin.yaml
 +  Same sandbox as bubblewrap, plus changes for hardware work: a bind whose
 +  source is a device node is mounted with --dev-bind (a plain --bind lands with
 +  nodev set, and the kernel refuses to open a device node on a nodev mount with
-+  EACCES, so /dev/ttyACM0 would be visible but unusable), and auto_devices binds
-+  /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time, and trust_operator
++  EACCES, so /dev/ttyACM0 would be visible but unusable), auto_bind_globs binds
++  whatever patterns the operator sets on every spawn, and trust_operator
 +  (off by default) which makes paths the operator names in binds/home_allow win
 +  over the hidden set instead of being silently dropped. The empty file bound
 +  over the hidden file paths now lives in the per-user runtime dir
@@ -162,7 +162,7 @@ diff -ruN a/plugin.yaml b/plugin.yaml
  requires_hermes: ">=0.22.6"
  platforms: [linux]
  tags: [terminal, sandbox, bubblewrap, linux]
-@@ -26,6 +32,27 @@
+@@ -26,6 +32,22 @@
      default: network
      label: Profile
      description: "restricted: read-only working directory, no network. workspace: writable working directory, no network. network: writable working directory and the host network."
@@ -171,28 +171,23 @@ diff -ruN a/plugin.yaml b/plugin.yaml
 +    default: false
 +    label: Trust operator paths
 +    description: "Off by default. When on, the paths named in binds and home_allow win over the hidden set: a bind inside HERMES_HOME or an allowlist entry such as .ssh is mounted/shown instead of being dropped with a warning, and no overlay hides it. This removes the sandbox's own escape protection — a read-write bind of HERMES_HOME lets a command rewrite this plugin's code and config.yaml, which runs on the host at the next spawn."
-+  auto_devices:
-+    type: bool
-+    default: true
-+    label: Auto-bind matched paths
-+    description: "Bind the paths matched by auto_globs at spawn time, read-write, so a board plugged in after startup is usable without touching config. Already-listed binds are not duplicated."
-+  auto_globs:
++  auto_bind_globs:
 +    type: list
-+    default: ["/dev/ttyACM*", "/dev/ttyUSB*"]
++    default: []
 +    label: Auto-bind globs
-+    description: "Glob patterns auto_devices resolves on every spawn, for example [\"/dev/ttyACM*\", \"/dev/serial/by-id/*\", \"/dev/bus/usb/*/*\"]. An explicit empty list disables the feature; an unset key keeps the serial default."
-+  auto_globs_kind:
++    description: "Glob patterns resolved on every spawn and bound read-write, for example [\"/dev/ttyACM*\", \"/dev/ttyUSB*\", \"/dev/bus/usb/*/*\"]. The list is the switch: empty (the default) binds nothing. Already-listed binds are not duplicated, and a pattern is re-read per spawn, so a board plugged in later is picked up."
++  auto_bind_globs_type:
 +    type: str
 +    choices: [device, any]
-+    default: device
-+    label: Auto-bind path kinds
-+    description: "device: only character/block device nodes are auto-bound (a stale symlink or a directory is skipped). any: regular files and sockets too, for tools that need a path of their own."
++    default: any
++    label: Auto-bind path types
++    description: "device: only character/block device nodes (a stale symlink or a file is skipped). any: regular files, sockets and devices, for a tool that needs a path of its own. Directories are never auto-bound; name them in binds."
    binds:
      type: list
      default: []
 diff -ruN a/sandbox.py b/sandbox.py
---- a/sandbox.py	2026-11-18 15:53:37.105867765 +0900
-+++ b/sandbox.py	2026-11-18 15:53:37.107215815 +0900
+--- a/sandbox.py	2026-11-18 16:03:56.681791518 +0900
++++ b/sandbox.py	2026-11-18 16:03:56.683385071 +0900
 @@ -2,7 +2,7 @@
  
  Every terminal command under ``terminal.backend: bubblewrap`` runs inside a
@@ -218,7 +213,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  import sys
  import subprocess
  import threading
-@@ -163,16 +165,23 @@
+@@ -163,16 +165,22 @@
  DEFAULT_CPU_SECONDS = 30
  DEFAULT_MAX_PROCS = 256
  
@@ -226,9 +221,8 @@ diff -ruN a/sandbox.py b/sandbox.py
 +# The plugin's settings keys (plugins.entries.bubblewrap-yuno.settings.<key>).
  SETTING_PROFILE = "profile"
  SETTING_BINDS = "binds"
-+SETTING_AUTO_DEVICES = "auto_devices"
-+SETTING_AUTO_GLOBS = "auto_globs"
-+SETTING_AUTO_GLOBS_KIND = "auto_globs_kind"
++SETTING_AUTO_BIND_GLOBS = "auto_bind_globs"
++SETTING_AUTO_BIND_GLOBS_TYPE = "auto_bind_globs_type"
 +SETTING_TRUST_OPERATOR = "trust_operator"
  SETTING_MEMORY_MB = "memory_mb"
  SETTING_CPU_SECONDS = "cpu_seconds"
@@ -238,20 +232,20 @@ diff -ruN a/sandbox.py b/sandbox.py
  SETTING_HOME_DEFAULT_DENY = "home_default_deny"
 -SETTINGS_PREFIX = "plugins.entries.bubblewrap.settings"
 +SETTINGS_PREFIX = "plugins.entries.bubblewrap-yuno.settings"
-+# Globs auto_devices binds at spawn time, and what kind of path they may match.
-+DEFAULT_AUTO_GLOBS: tuple[str, ...] = ("/dev/ttyACM*", "/dev/ttyUSB*")
-+AUTO_GLOB_KINDS: tuple[str, ...] = ("device", "any")
++# What auto_bind_globs may match: device nodes only, or any non-directory path.
++AUTO_BIND_TYPES: tuple[str, ...] = ("device", "any")
++DEFAULT_AUTO_BIND_TYPE = "any"
  # terminal.home_mode is a core setting; core bridges it to this env name and
  # hermes_constants.get_subprocess_home reads it. The spellings that
  # get_subprocess_home treats as "profile".
-@@ -210,11 +219,17 @@
+@@ -210,11 +218,17 @@
  
  @dataclass(frozen=True)
  class BindMount:
 -    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox."""
 +    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox.
 +
-+    *auto* marks a bind that auto_devices produced from a glob rather than one
++    *auto* marks a bind that auto_bind_globs produced rather than one
 +    the operator wrote: it is a convenience, so a source the backend would
 +    refuse is skipped with a warning instead of failing the whole spawn.
 +    """
@@ -263,20 +257,20 @@ diff -ruN a/sandbox.py b/sandbox.py
  
  
  @dataclass(frozen=True)
-@@ -235,6 +250,12 @@
+@@ -235,6 +249,12 @@
      home_allow: tuple[str, ...] = ()
      hide: tuple[str, ...] = ()
      home_default_deny: str = bubblewrap_home.DENY_DOT
 +    # Operator-trusted mode: what binds and home_allow name is shown, not hidden.
 +    trust_operator: bool = False
-+    # auto_devices: the globs bound at each spawn, and whether they may match a
-+    # path that is not a device node ("any").
-+    auto_globs: tuple[str, ...] = DEFAULT_AUTO_GLOBS
-+    auto_globs_kind: str = "device"
++    # auto_bind_globs: patterns bound at each spawn (empty means none), and
++    # what they may match: "device" nodes only, or "any" non-directory path.
++    auto_bind_globs: tuple[str, ...] = ()
++    auto_bind_globs_type: str = DEFAULT_AUTO_BIND_TYPE
  
  
  def _setting_name(key: str) -> str:
-@@ -313,6 +334,69 @@
+@@ -313,6 +333,69 @@
      return value
  
  
@@ -300,7 +294,7 @@ diff -ruN a/sandbox.py b/sandbox.py
 +
 +    Read at every config load, which the backend does per spawn: a board plugged
 +    in after startup is picked up by the next command, and one unplugged simply
-+    stops being bound. *patterns* is the operator's auto_globs setting. Under
++    stops being bound. *patterns* is the operator's auto_bind_globs setting. Under
 +    kind="device" only character and block nodes are taken, which keeps a stale
 +    symlink or a directory out of the mount list; kind="any" also takes regular
 +    files, directories and sockets, for a tool that needs a path of its own.
@@ -323,7 +317,7 @@ diff -ruN a/sandbox.py b/sandbox.py
 +                # the mount list; a directory named in binds still can be bound.
 +                logger.warning(
 +                    "%s pattern %s matched the directory %s, which is not auto-bound: name it in binds instead",
-+                    _setting_name(SETTING_AUTO_GLOBS), pattern, matched,
++                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
 +                )
 +                continue
 +            if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
@@ -335,7 +329,7 @@ diff -ruN a/sandbox.py b/sandbox.py
 +                # ends up opening, and the alias path does not exist inside the
 +                # sandbox's fresh /dev (its parent would have to be created).
 +                logger.debug(
-+                    "auto_globs: %s resolves to %s, already bound", matched, real,
++                    "auto_bind_globs: %s resolves to %s, already bound", matched, real,
 +                )
 +                continue
 +            covered.add(real)
@@ -346,16 +340,19 @@ diff -ruN a/sandbox.py b/sandbox.py
  def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mode: str = "") -> BubblewrapConfig:
      """Build the config from the plugin's settings mapping and terminal.home_mode.
  
-@@ -323,9 +407,17 @@
+@@ -323,9 +406,20 @@
      """
      settings = settings or {}
      profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
 +    binds = _parse_binds(settings.get(SETTING_BINDS))
-+    # An explicit empty list means "no auto binds"; an unset key means the default.
-+    raw_globs = settings.get(SETTING_AUTO_GLOBS)
-+    auto_globs = _parse_string_list(SETTING_AUTO_GLOBS, raw_globs) if raw_globs is not None else DEFAULT_AUTO_GLOBS
-+    auto_kind = _parse_choice(SETTING_AUTO_GLOBS_KIND, settings.get(SETTING_AUTO_GLOBS_KIND), AUTO_GLOB_KINDS, "device")
-+    if _parse_bool(SETTING_AUTO_DEVICES, settings.get(SETTING_AUTO_DEVICES), True):
++    # The list is the switch: unset or empty binds nothing, so there is no
++    # built-in pattern to surprise an operator who never asked for one.
++    auto_globs = _parse_string_list(SETTING_AUTO_BIND_GLOBS, settings.get(SETTING_AUTO_BIND_GLOBS))
++    auto_kind = _parse_choice(
++        SETTING_AUTO_BIND_GLOBS_TYPE, settings.get(SETTING_AUTO_BIND_GLOBS_TYPE),
++        AUTO_BIND_TYPES, DEFAULT_AUTO_BIND_TYPE,
++    )
++    if auto_globs:
 +        binds += auto_glob_binds(binds, auto_globs, auto_kind)
 +    trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
      return BubblewrapConfig(
@@ -365,17 +362,17 @@ diff -ruN a/sandbox.py b/sandbox.py
          memory_mb=_parse_limit(SETTING_MEMORY_MB, settings.get(SETTING_MEMORY_MB), DEFAULT_MEMORY_MB),
          cpu_seconds=_parse_limit(SETTING_CPU_SECONDS, settings.get(SETTING_CPU_SECONDS), DEFAULT_CPU_SECONDS),
          max_procs=_parse_limit(SETTING_MAX_PROCS, settings.get(SETTING_MAX_PROCS), DEFAULT_MAX_PROCS),
-@@ -336,6 +428,9 @@
+@@ -336,6 +430,9 @@
              SETTING_HOME_DEFAULT_DENY, settings.get(SETTING_HOME_DEFAULT_DENY),
              (bubblewrap_home.DENY_DOT, bubblewrap_home.DENY_ALL), bubblewrap_home.DENY_DOT,
          ),
 +        trust_operator=trust_operator,
-+        auto_globs=tuple(auto_globs),
-+        auto_globs_kind=auto_kind,
++        auto_bind_globs=tuple(auto_globs),
++        auto_bind_globs_type=auto_kind,
      )
  
  
-@@ -368,6 +463,73 @@
+@@ -368,6 +465,73 @@
      return tuple(resolved)
  
  
@@ -449,7 +446,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  def sensitive_paths(home: str, hermes_home: str, extra: Sequence[str] = ()) -> tuple[str, ...]:
      """Real host paths that must stay hidden: the HOME set, HERMES_HOME and HOME/.hermes.
  
-@@ -408,19 +570,69 @@
+@@ -408,19 +572,69 @@
      )
  
  
@@ -530,7 +527,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  
  
  def sensitive_overlay_args(hidden_paths: Sequence[str], state_dir: str) -> list[str]:
-@@ -449,6 +661,24 @@
+@@ -449,6 +663,24 @@
      return argv
  
  
@@ -555,7 +552,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  # Marks an argument the caller left out, where None already has a meaning.
  _UNRESOLVED: object = object()
  
-@@ -574,6 +804,8 @@
+@@ -574,6 +806,8 @@
      home_root: str | None,
      home_allow: Sequence[str],
      home_default_deny: str = bubblewrap_home.DENY_DOT,
@@ -564,7 +561,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  ) -> bubblewrap_binds.BindGuard:
      """The BindGuard for an environment: the hidden set split into credential stores and Hermes homes."""
      homes = tuple(homes)
-@@ -585,6 +817,8 @@
+@@ -585,6 +819,8 @@
          home_root=home_root,
          home_allow=tuple(home_allow),
          home_default_deny=home_default_deny,
@@ -573,7 +570,7 @@ diff -ruN a/sandbox.py b/sandbox.py
      )
  
  
-@@ -675,17 +909,17 @@
+@@ -675,17 +911,17 @@
      for bind in binds:
          if is_sensitive_source(bind.src, hidden_paths):
              logger.warning(
@@ -594,7 +591,7 @@ diff -ruN a/sandbox.py b/sandbox.py
              )
              continue
          kept.append(bind)
-@@ -888,8 +1122,7 @@
+@@ -888,8 +1124,7 @@
      spawn.
      """
      profile = resolve_profile(config.profile)
@@ -604,7 +601,7 @@ diff -ruN a/sandbox.py b/sandbox.py
      # Resolved first: get_scratch_dir makes the directory, and with it HOME
      # when HERMES_HOME lies under a HOME that does not exist yet.
      if scratch_dir is None:
-@@ -899,7 +1132,7 @@
+@@ -899,7 +1134,7 @@
      if home_allow is None and home_root is not None:
          home_allow = bubblewrap_home.resolve_allowlist(
              home_root, "", (),
@@ -613,7 +610,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          )
      if profile_home is _UNRESOLVED:
          profile_home = None
-@@ -914,6 +1147,8 @@
+@@ -914,6 +1149,8 @@
          guard = bind_guard(
              hidden_paths, hermes_homes(home, hermes_home), writable,
              home_root, home_allow or (), config.home_default_deny,  # type: ignore[arg-type]
@@ -622,7 +619,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          )
          ca_bundles = ca_bundle_binds(guard)
  
-@@ -950,7 +1185,15 @@
+@@ -950,7 +1187,15 @@
      mounts: list[tuple[str, str, str]] = [
          ("--bind-try" if profile.writable_cwd else "--ro-bind-try", initial_cwd, initial_cwd),
      ]
@@ -639,7 +636,7 @@ diff -ruN a/sandbox.py b/sandbox.py
      writable = [(initial_cwd, initial_cwd)] if profile.writable_cwd else []
      writable += [(bind.src, bind.dest) for bind in binds if not bind.readonly]
      mount_points = [initial_cwd, *(bind.dest for bind in binds)]
-@@ -972,6 +1215,7 @@
+@@ -972,6 +1217,7 @@
      if home_root is None:
          for mount in mounts:
              argv += mount
@@ -647,7 +644,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          # Pin the parents of the hidden paths that sit inside a writable bind
          # (see ancestor_pin_args) after those binds, so the pins land on top
          # of them, and before the overlays, so the overlays land on the pins.
-@@ -1019,6 +1263,7 @@
+@@ -1019,6 +1265,7 @@
          for mount in mounts:
              if not in_home(mount[2]):
                  argv += mount
@@ -655,7 +652,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          argv += bubblewrap_home.home_layout_args(
              root,
              units,
-@@ -1439,7 +1684,9 @@
+@@ -1439,7 +1686,9 @@
          # Resolved once and kept for the life of the environment: the set
          # never follows a symlink swapped in later.
          self._operator_hidden = operator_hidden_paths(self._home, self._config.hide)
@@ -666,7 +663,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          # HOME is default-deny (home_default_deny). What a sandbox may see is
          # fixed here too: a command cannot widen it by changing PATH.
          self._home_root = bubblewrap_home.resolve_home_root(self._home)
-@@ -1453,7 +1700,7 @@
+@@ -1453,7 +1702,7 @@
          if self._home_root is not None:
              self._home_allow = bubblewrap_home.resolve_allowlist(
                  self._home_root, os.environ.get("PATH", ""), self._config.home_allow,
@@ -675,7 +672,7 @@ diff -ruN a/sandbox.py b/sandbox.py
                  denied_paths=self._hidden_paths,
                  default_deny=self._config.home_default_deny,
              )
-@@ -1502,7 +1749,6 @@
+@@ -1502,7 +1751,6 @@
          # Read-only and outside the state dir: nothing in a sandbox can
          # write to what shows at the hidden file paths.
          self._empty_file = empty_file_path(self._state_dir)
@@ -683,7 +680,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          try:
              self._make_private_scratch()
          except BaseException:
-@@ -1564,7 +1810,8 @@
+@@ -1564,7 +1812,8 @@
              home_root = None
          guard = bind_guard(
              self._hidden_paths, hermes_homes(self._home, self._hermes_home), writable, home_root, self._home_allow,
@@ -693,7 +690,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          )
          kept: list[BindMount] = []
          for bind in self._config.binds:
-@@ -1855,6 +2102,7 @@
+@@ -1855,6 +2104,7 @@
          nothing the root bind does not.
          """
          writable = self._writable
@@ -701,14 +698,14 @@ diff -ruN a/sandbox.py b/sandbox.py
          for bind in self._config.binds:
              if bind.readonly:
                  continue
-@@ -1874,8 +2122,15 @@
+@@ -1874,8 +2124,15 @@
                      f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
                      "writable inside the sandbox"
                  )
 +            if bind.auto:
 +                logger.warning(
 +                    "bubblewrap: not auto-binding %s (%s matched it): %s",
-+                    bind.src, _setting_name(SETTING_AUTO_GLOBS), problem,
++                    bind.src, _setting_name(SETTING_AUTO_BIND_GLOBS), problem,
 +                )
 +                skipped.append(bind)
 +                continue
@@ -718,7 +715,7 @@ diff -ruN a/sandbox.py b/sandbox.py
                  f"and {problem} with the bubblewrap backend: a command could swap the "
                  "source and choose the next spawn's mount. Bind it read-write only at "
                  "its own path (dest equal to src) directly under terminal.cwd, a "
-@@ -1883,6 +2138,11 @@
+@@ -1883,6 +2140,11 @@
                  "way: bound at its own path the source is a mount point, which no "
                  "command can rename or move from any path; or make it read-only."
              )
@@ -730,7 +727,7 @@ diff -ruN a/sandbox.py b/sandbox.py
  
      def _check_absent_denied_paths(self) -> None:
          """Refuse a writable bind under which a command could create a credential path.
-@@ -1946,6 +2206,14 @@
+@@ -1946,6 +2208,14 @@
          that maps elsewhere, and a source containing one at its own path
          sits below the overlay.
          """
@@ -745,7 +742,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          profile_home = os.path.realpath(os.path.join(self._hermes_home, "home"))
          if self._config.home_mode in PROFILE_HOME_MODES and _is_within(sandbox_root, profile_home):
              raise ValueError(
-@@ -1965,7 +2233,7 @@
+@@ -1965,7 +2235,7 @@
                      "writable inside the sandbox with the bubblewrap backend: a command "
                      "could replace the empty file bound over hidden files. Set "
                      "terminal.sandbox_dir to a directory outside terminal.cwd and "

@@ -168,9 +168,8 @@ DEFAULT_MAX_PROCS = 256
 # The plugin's settings keys (plugins.entries.bubblewrap-yuno.settings.<key>).
 SETTING_PROFILE = "profile"
 SETTING_BINDS = "binds"
-SETTING_AUTO_DEVICES = "auto_devices"
-SETTING_AUTO_GLOBS = "auto_globs"
-SETTING_AUTO_GLOBS_KIND = "auto_globs_kind"
+SETTING_AUTO_BIND_GLOBS = "auto_bind_globs"
+SETTING_AUTO_BIND_GLOBS_TYPE = "auto_bind_globs_type"
 SETTING_TRUST_OPERATOR = "trust_operator"
 SETTING_MEMORY_MB = "memory_mb"
 SETTING_CPU_SECONDS = "cpu_seconds"
@@ -179,9 +178,9 @@ SETTING_HOME_ALLOW = "home_allow"
 SETTING_HIDE = "hide"
 SETTING_HOME_DEFAULT_DENY = "home_default_deny"
 SETTINGS_PREFIX = "plugins.entries.bubblewrap-yuno.settings"
-# Globs auto_devices binds at spawn time, and what kind of path they may match.
-DEFAULT_AUTO_GLOBS: tuple[str, ...] = ("/dev/ttyACM*", "/dev/ttyUSB*")
-AUTO_GLOB_KINDS: tuple[str, ...] = ("device", "any")
+# What auto_bind_globs may match: device nodes only, or any non-directory path.
+AUTO_BIND_TYPES: tuple[str, ...] = ("device", "any")
+DEFAULT_AUTO_BIND_TYPE = "any"
 # terminal.home_mode is a core setting; core bridges it to this env name and
 # hermes_constants.get_subprocess_home reads it. The spellings that
 # get_subprocess_home treats as "profile".
@@ -221,7 +220,7 @@ def resolve_profile(name: str) -> Profile:
 class BindMount:
     """One operator-supplied bind: host *src* mounted at *dest* in the sandbox.
 
-    *auto* marks a bind that auto_devices produced from a glob rather than one
+    *auto* marks a bind that auto_bind_globs produced rather than one
     the operator wrote: it is a convenience, so a source the backend would
     refuse is skipped with a warning instead of failing the whole spawn.
     """
@@ -252,10 +251,10 @@ class BubblewrapConfig:
     home_default_deny: str = bubblewrap_home.DENY_DOT
     # Operator-trusted mode: what binds and home_allow name is shown, not hidden.
     trust_operator: bool = False
-    # auto_devices: the globs bound at each spawn, and whether they may match a
-    # path that is not a device node ("any").
-    auto_globs: tuple[str, ...] = DEFAULT_AUTO_GLOBS
-    auto_globs_kind: str = "device"
+    # auto_bind_globs: patterns bound at each spawn (empty means none), and
+    # what they may match: "device" nodes only, or "any" non-directory path.
+    auto_bind_globs: tuple[str, ...] = ()
+    auto_bind_globs_type: str = DEFAULT_AUTO_BIND_TYPE
 
 
 def _setting_name(key: str) -> str:
@@ -354,7 +353,7 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
 
     Read at every config load, which the backend does per spawn: a board plugged
     in after startup is picked up by the next command, and one unplugged simply
-    stops being bound. *patterns* is the operator's auto_globs setting. Under
+    stops being bound. *patterns* is the operator's auto_bind_globs setting. Under
     kind="device" only character and block nodes are taken, which keeps a stale
     symlink or a directory out of the mount list; kind="any" also takes regular
     files, directories and sockets, for a tool that needs a path of its own.
@@ -377,7 +376,7 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                 # the mount list; a directory named in binds still can be bound.
                 logger.warning(
                     "%s pattern %s matched the directory %s, which is not auto-bound: name it in binds instead",
-                    _setting_name(SETTING_AUTO_GLOBS), pattern, matched,
+                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
                 )
                 continue
             if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
@@ -389,7 +388,7 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                 # ends up opening, and the alias path does not exist inside the
                 # sandbox's fresh /dev (its parent would have to be created).
                 logger.debug(
-                    "auto_globs: %s resolves to %s, already bound", matched, real,
+                    "auto_bind_globs: %s resolves to %s, already bound", matched, real,
                 )
                 continue
             covered.add(real)
@@ -408,11 +407,14 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
     settings = settings or {}
     profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
     binds = _parse_binds(settings.get(SETTING_BINDS))
-    # An explicit empty list means "no auto binds"; an unset key means the default.
-    raw_globs = settings.get(SETTING_AUTO_GLOBS)
-    auto_globs = _parse_string_list(SETTING_AUTO_GLOBS, raw_globs) if raw_globs is not None else DEFAULT_AUTO_GLOBS
-    auto_kind = _parse_choice(SETTING_AUTO_GLOBS_KIND, settings.get(SETTING_AUTO_GLOBS_KIND), AUTO_GLOB_KINDS, "device")
-    if _parse_bool(SETTING_AUTO_DEVICES, settings.get(SETTING_AUTO_DEVICES), True):
+    # The list is the switch: unset or empty binds nothing, so there is no
+    # built-in pattern to surprise an operator who never asked for one.
+    auto_globs = _parse_string_list(SETTING_AUTO_BIND_GLOBS, settings.get(SETTING_AUTO_BIND_GLOBS))
+    auto_kind = _parse_choice(
+        SETTING_AUTO_BIND_GLOBS_TYPE, settings.get(SETTING_AUTO_BIND_GLOBS_TYPE),
+        AUTO_BIND_TYPES, DEFAULT_AUTO_BIND_TYPE,
+    )
+    if auto_globs:
         binds += auto_glob_binds(binds, auto_globs, auto_kind)
     trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
     return BubblewrapConfig(
@@ -429,8 +431,8 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
             (bubblewrap_home.DENY_DOT, bubblewrap_home.DENY_ALL), bubblewrap_home.DENY_DOT,
         ),
         trust_operator=trust_operator,
-        auto_globs=tuple(auto_globs),
-        auto_globs_kind=auto_kind,
+        auto_bind_globs=tuple(auto_globs),
+        auto_bind_globs_type=auto_kind,
     )
 
 
@@ -2125,7 +2127,7 @@ class BubblewrapEnvironment(LocalEnvironment):
             if bind.auto:
                 logger.warning(
                     "bubblewrap: not auto-binding %s (%s matched it): %s",
-                    bind.src, _setting_name(SETTING_AUTO_GLOBS), problem,
+                    bind.src, _setting_name(SETTING_AUTO_BIND_GLOBS), problem,
                 )
                 skipped.append(bind)
                 continue
