@@ -1,6 +1,6 @@
 diff -ruN a/__init__.py b/__init__.py
---- a/__init__.py	2026-11-18 16:43:22.263658880 +0900
-+++ b/__init__.py	2026-11-18 16:43:22.264987920 +0900
+--- a/__init__.py	2026-11-18 16:53:06.342380727 +0900
++++ b/__init__.py	2026-11-18 16:53:06.343667646 +0900
 @@ -1,7 +1,11 @@
 -"""Bubblewrap terminal backend for Hermes Agent (Linux).
 +"""Bubblewrap terminal backend for Hermes Agent (Linux) — local fork by yuno.
@@ -78,8 +78,8 @@ diff -ruN a/__init__.py b/__init__.py
  
  
 diff -ruN a/binds.py b/binds.py
---- a/binds.py	2026-11-18 16:43:22.263581319 +0900
-+++ b/binds.py	2026-11-18 16:43:22.264865718 +0900
+--- a/binds.py	2026-11-18 16:53:06.342303086 +0900
++++ b/binds.py	2026-11-18 16:53:06.343588695 +0900
 @@ -76,6 +76,11 @@
      home_root: str | None = None
      home_allow: tuple[str, ...] = ()
@@ -161,8 +161,8 @@ diff -ruN a/binds.py b/binds.py
          return real
      logger.warning("bubblewrap: not binding %s (%s): %s", label, path, reason)
 diff -ruN a/home.py b/home.py
---- a/home.py	2026-11-18 16:43:22.263620659 +0900
-+++ b/home.py	2026-11-18 16:43:22.264903549 +0900
+--- a/home.py	2026-11-18 16:53:06.342342617 +0900
++++ b/home.py	2026-11-18 16:53:06.343625886 +0900
 @@ -199,8 +199,8 @@
      ".local/share/mime",
  )
@@ -175,15 +175,15 @@ diff -ruN a/home.py b/home.py
  DENY_ALL = "all"
  
 diff -ruN a/plugin.yaml b/plugin.yaml
---- a/plugin.yaml	2026-11-18 16:43:22.263690170 +0900
-+++ b/plugin.yaml	2026-11-18 16:43:22.265041971 +0900
+--- a/plugin.yaml	2026-11-18 16:53:06.342410498 +0900
++++ b/plugin.yaml	2026-11-18 16:53:06.343699697 +0900
 @@ -1,19 +1,25 @@
 -name: bubblewrap
 -label: Bubblewrap
 -version: 1.5.1
 +name: bubblewrap-yuno
 +label: Bubblewrap (yuno)
-+version: 1.5.1+yuno.7
++version: 1.5.1+yuno.8
  manifest_version: 2
  kind: backend
 -author: NousResearch
@@ -238,8 +238,8 @@ diff -ruN a/plugin.yaml b/plugin.yaml
      type: list
      default: []
 diff -ruN a/sandbox.py b/sandbox.py
---- a/sandbox.py	2026-11-18 16:43:22.263477827 +0900
-+++ b/sandbox.py	2026-11-18 16:43:22.264766957 +0900
+--- a/sandbox.py	2026-11-18 16:53:06.342203655 +0900
++++ b/sandbox.py	2026-11-18 16:53:06.343484134 +0900
 @@ -2,7 +2,7 @@
  
  Every terminal command under ``terminal.backend: bubblewrap`` runs inside a
@@ -504,6 +504,10 @@ diff -ruN a/sandbox.py b/sandbox.py
 -def empty_file_path(state_dir: str) -> str:
 -    """Host path of the zero-length file bound over sensitive files.
 +EMPTY_FILE_DIR_NAME = "hermes-bwrap-empty"
++
++
++def empty_file_dir() -> str | None:
++    """Host dir holding the zero-length file bound over hidden files.
  
 -    It sits beside the state dir, not inside it: the state dir is bound
 -    read-write into every spawn, so a file kept there could be rewritten
@@ -513,10 +517,6 @@ diff -ruN a/sandbox.py b/sandbox.py
 -    when it resolves the bind source; BubblewrapEnvironment therefore
 -    refuses a sandbox dir inside the cwd or a read-write operator bind
 -    unless a hidden path covers it (_check_sandbox_root).
-+
-+def empty_file_dir() -> str | None:
-+    """Host dir holding the zero-length file bound over hidden files.
-+
 +    It must lie outside every path a sandbox can write: the empty file is a
 +    mount source, and bwrap follows a symlink found in its place, so a
 +    directory a command can write to would let it point the source at a
@@ -723,15 +723,16 @@ diff -ruN a/sandbox.py b/sandbox.py
                  denied_paths=self._hidden_paths,
                  default_deny=self._config.home_default_deny,
              )
-@@ -1502,7 +1750,6 @@
+@@ -1502,7 +1750,7 @@
          # Read-only and outside the state dir: nothing in a sandbox can
          # write to what shows at the hidden file paths.
          self._empty_file = empty_file_path(self._state_dir)
 -        os.close(os.open(self._empty_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400))
++        self._check_empty_file_reachable()
          try:
              self._make_private_scratch()
          except BaseException:
-@@ -1564,7 +1811,8 @@
+@@ -1564,7 +1812,8 @@
              home_root = None
          guard = bind_guard(
              self._hidden_paths, hermes_homes(self._home, self._hermes_home), writable, home_root, self._home_allow,
@@ -741,7 +742,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          )
          kept: list[BindMount] = []
          for bind in self._config.binds:
-@@ -1589,6 +1837,10 @@
+@@ -1589,6 +1838,10 @@
              self._scratch_dir = bubblewrap_binds.validated_bind_source(
                  "the Hermes scratch dir", self._scratch_dir, guard, kind=bubblewrap_binds.DIRECTORY,
                  public=(os.path.join(self._hermes_home, "cache", "scratch"),),
@@ -752,7 +753,7 @@ diff -ruN a/sandbox.py b/sandbox.py
              )
  
      def _validated_profile_home(self, guard: bubblewrap_binds.BindGuard) -> tuple[str, str] | None:
-@@ -1611,6 +1863,7 @@
+@@ -1611,6 +1864,7 @@
          real, reason = bubblewrap_binds.bind_refusal(
              link, guard, kind=bubblewrap_binds.DIRECTORY, dest=link,
              public=() if os.path.islink(link) else (link,),
@@ -760,7 +761,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          )
          if reason is not None:
              raise ValueError(
-@@ -1855,6 +2108,7 @@
+@@ -1855,6 +2109,7 @@
          nothing the root bind does not.
          """
          writable = self._writable
@@ -768,7 +769,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          for bind in self._config.binds:
              if bind.readonly:
                  continue
-@@ -1874,8 +2128,15 @@
+@@ -1874,8 +2129,15 @@
                      f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
                      "writable inside the sandbox"
                  )
@@ -785,7 +786,7 @@ diff -ruN a/sandbox.py b/sandbox.py
                  f"and {problem} with the bubblewrap backend: a command could swap the "
                  "source and choose the next spawn's mount. Bind it read-write only at "
                  "its own path (dest equal to src) directly under terminal.cwd, a "
-@@ -1883,6 +2144,11 @@
+@@ -1883,6 +2145,11 @@
                  "way: bound at its own path the source is a mount point, which no "
                  "command can rename or move from any path; or make it read-only."
              )
@@ -797,7 +798,41 @@ diff -ruN a/sandbox.py b/sandbox.py
  
      def _check_absent_denied_paths(self) -> None:
          """Refuse a writable bind under which a command could create a credential path.
-@@ -1946,6 +2212,14 @@
+@@ -1928,6 +2195,33 @@
+                     "a project directory as terminal.cwd."
+                 )
+ 
++    def _check_empty_file_reachable(self) -> None:
++        """Refuse a bind that puts the empty file bound over hidden files in reach.
++
++        That file is a mount source bwrap resolves on every spawn, so a command
++        that can write it could point it at a secret. Three things make a swap
++        impractical today: the name carries a per-spawn uuid, the file is made
++        in this process immediately before the mount, and anything but a regular
++        file at that path is unlinked first. None of that is a property worth
++        relying on, so the configuration that makes the file reachable at all is
++        refused: a read-write bind whose source covers its directory (typically
++        the per-user runtime dir or the empty-file directory itself). A
++        read-only bind shows an empty file and nothing else.
++        """
++        empty_dir = os.path.realpath(os.path.dirname(self._empty_file))
++        for bind in self._config.binds:
++            if bind.readonly:
++                continue
++            for path in (bind.src, bind.dest):
++                real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
++                if _is_within(empty_dir, real):
++                    raise ValueError(
++                        f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest} is read-write and "
++                        f"covers {empty_dir}, where the empty file bound over hidden files lives: a command "
++                        "could replace it and make the next spawn show a hidden file. Bind that directory "
++                        "read-only, or drop the entry."
++                    )
++
+     def _check_sandbox_root(self, sandbox_root: str) -> None:
+         """Refuse a sandbox dir a sandbox could write to.
+ 
+@@ -1946,6 +2240,14 @@
          that maps elsewhere, and a source containing one at its own path
          sits below the overlay.
          """
@@ -812,7 +847,7 @@ diff -ruN a/sandbox.py b/sandbox.py
          profile_home = os.path.realpath(os.path.join(self._hermes_home, "home"))
          if self._config.home_mode in PROFILE_HOME_MODES and _is_within(sandbox_root, profile_home):
              raise ValueError(
-@@ -1965,7 +2239,7 @@
+@@ -1965,7 +2267,7 @@
                      "writable inside the sandbox with the bubblewrap backend: a command "
                      "could replace the empty file bound over hidden files. Set "
                      "terminal.sandbox_dir to a directory outside terminal.cwd and "

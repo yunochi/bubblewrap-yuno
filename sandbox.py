@@ -1750,6 +1750,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         # Read-only and outside the state dir: nothing in a sandbox can
         # write to what shows at the hidden file paths.
         self._empty_file = empty_file_path(self._state_dir)
+        self._check_empty_file_reachable()
         try:
             self._make_private_scratch()
         except BaseException:
@@ -2193,6 +2194,33 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "subdirectory you need (for a cache, that one cache directory), or use "
                     "a project directory as terminal.cwd."
                 )
+
+    def _check_empty_file_reachable(self) -> None:
+        """Refuse a bind that puts the empty file bound over hidden files in reach.
+
+        That file is a mount source bwrap resolves on every spawn, so a command
+        that can write it could point it at a secret. Three things make a swap
+        impractical today: the name carries a per-spawn uuid, the file is made
+        in this process immediately before the mount, and anything but a regular
+        file at that path is unlinked first. None of that is a property worth
+        relying on, so the configuration that makes the file reachable at all is
+        refused: a read-write bind whose source covers its directory (typically
+        the per-user runtime dir or the empty-file directory itself). A
+        read-only bind shows an empty file and nothing else.
+        """
+        empty_dir = os.path.realpath(os.path.dirname(self._empty_file))
+        for bind in self._config.binds:
+            if bind.readonly:
+                continue
+            for path in (bind.src, bind.dest):
+                real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+                if _is_within(empty_dir, real):
+                    raise ValueError(
+                        f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest} is read-write and "
+                        f"covers {empty_dir}, where the empty file bound over hidden files lives: a command "
+                        "could replace it and make the next spawn show a hidden file. Bind that directory "
+                        "read-only, or drop the entry."
+                    )
 
     def _check_sandbox_root(self, sandbox_root: str) -> None:
         """Refuse a sandbox dir a sandbox could write to.
