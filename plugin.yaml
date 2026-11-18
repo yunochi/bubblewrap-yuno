@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.5
+version: 1.5.1+yuno.6
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
@@ -47,7 +47,7 @@ config_schema:
     choices: [device, any]
     default: any
     label: Auto-bind path types
-    description: "device: only character/block device nodes (a stale symlink or a file is skipped). any: regular files, sockets and devices, for a tool that needs a path of its own. Directories are never auto-bound; name them in binds."
+    description: "device: only character/block device nodes (a stale symlink or a file is skipped). any: whatever the pattern matched — devices, files, sockets and directories, the last read-write with the whole tree under it."
   binds:
     type: list
     default: []
