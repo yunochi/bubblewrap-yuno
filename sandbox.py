@@ -1817,12 +1817,6 @@ class BubblewrapEnvironment(LocalEnvironment):
         kept: list[BindMount] = []
         for bind in self._config.binds:
             label = f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest}"
-            if bind.auto and self._config.trust_operator:
-                # Same call as an operator-written bind: trust_operator means the
-                # operator's own patterns are taken as they are, even where the
-                # guard would call a read-write source swappable.
-                kept.append(bind)
-                continue
             real, reason = bubblewrap_binds.bind_refusal(
                 bind.src, guard, kind=bubblewrap_binds.ANY, dest=bind.dest, hidden_rules=False,
             )
@@ -1843,6 +1837,10 @@ class BubblewrapEnvironment(LocalEnvironment):
             self._scratch_dir = bubblewrap_binds.validated_bind_source(
                 "the Hermes scratch dir", self._scratch_dir, guard, kind=bubblewrap_binds.DIRECTORY,
                 public=(os.path.join(self._hermes_home, "cache", "scratch"),),
+                # The backend's own path: inside a tree the operator already
+                # granted read-write it buys nothing new, and dropping it would
+                # take $TMPDIR away from every command.
+                allow_trusted_root=True,
             )
 
     def _validated_profile_home(self, guard: bubblewrap_binds.BindGuard) -> tuple[str, str] | None:
@@ -1865,6 +1863,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         real, reason = bubblewrap_binds.bind_refusal(
             link, guard, kind=bubblewrap_binds.DIRECTORY, dest=link,
             public=() if os.path.islink(link) else (link,),
+            allow_trusted_root=True,
         )
         if reason is not None:
             raise ValueError(
@@ -2129,14 +2128,6 @@ class BubblewrapEnvironment(LocalEnvironment):
                     f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
                     "writable inside the sandbox"
                 )
-            if bind.auto and self._config.trust_operator:
-                # The operator asked for this path through a glob and trust is on:
-                # the same call they make for binds and home_allow.
-                logger.warning(
-                    "bubblewrap: auto-binding %s although %s (%s is on)",
-                    bind.src, problem, _setting_name(SETTING_TRUST_OPERATOR),
-                )
-                continue
             if bind.auto:
                 logger.warning(
                     "bubblewrap: not auto-binding %s (%s matched it): %s",

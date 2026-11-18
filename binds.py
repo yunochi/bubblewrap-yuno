@@ -130,6 +130,7 @@ def _refusal(
     public: Sequence[str],
     dest: str | None,
     hidden_rules: bool,
+    allow_trusted_root: bool,
 ) -> str | None:
     """Why *real* must not be bound, else None. The order puts the most specific reason first."""
     problem = _kind_problem(real, kind)
@@ -138,10 +139,14 @@ def _refusal(
     root = guard.writable_root(real)
     # A source bound at its own path directly under a writable root is a
     # mount point inside, and its parent is the root, also a mount point:
-    # no command can rename either, so the source cannot be swapped. Under
-    # trust_operator a writable root the operator named is accepted as is.
+    # no command can rename either, so the source cannot be swapped. Only the
+    # backend's own paths (the scratch dir, the profile home) pass
+    # *allow_trusted_root*: swapping one inside a tree the operator already
+    # granted would add nothing they cannot do there, but an operator bind gets
+    # no such exemption — a symlink would buy the next spawn any host path.
     if root is not None and not (dest == real and os.path.dirname(real) == root):
-        if not (guard.trust_operator and any(_is_within(root, trusted) for trusted in guard.trusted)):
+        if not (allow_trusted_root and guard.trust_operator
+                and any(_is_within(root, trusted) for trusted in guard.trusted)):
             return f"{real} lies in {root}, which a sandbox can write to, so a command could swap it"
     if not hidden_rules or guard.trust_operator:
         return None
@@ -175,6 +180,7 @@ def bind_refusal(
     public: Sequence[str] = (),
     dest: str | None = None,
     hidden_rules: bool = True,
+    allow_trusted_root: bool = False,
 ) -> tuple[str, str | None]:
     """Resolve *path* once: ``(real path, None)`` when it may be bound, ``(real path, reason)`` otherwise.
 
@@ -190,7 +196,10 @@ def bind_refusal(
     real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
     if not os.path.exists(real):
         return real, f"{real} does not exist"
-    return real, _refusal(real, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
+    return real, _refusal(
+        real, guard, kind=kind, public=public, dest=dest,
+        hidden_rules=hidden_rules, allow_trusted_root=allow_trusted_root,
+    )
 
 
 def validated_bind_source(
@@ -202,6 +211,7 @@ def validated_bind_source(
     public: Sequence[str] = (),
     dest: str | None = None,
     hidden_rules: bool = True,
+    allow_trusted_root: bool = False,
 ) -> str | None:
     """The real path to bind for *path* (see :func:`bind_refusal`), or None with one warning.
 
@@ -210,7 +220,10 @@ def validated_bind_source(
     leaves the sandbox running. *label* names the setting or variable in
     the warning.
     """
-    real, reason = bind_refusal(path, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
+    real, reason = bind_refusal(
+        path, guard, kind=kind, public=public, dest=dest,
+        hidden_rules=hidden_rules, allow_trusted_root=allow_trusted_root,
+    )
     if reason is None:
         return real
     logger.warning("bubblewrap: not binding %s (%s): %s", label, path, reason)
