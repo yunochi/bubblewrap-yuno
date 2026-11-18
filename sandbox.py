@@ -2217,13 +2217,19 @@ class BubblewrapEnvironment(LocalEnvironment):
     def _check_sandbox_root(self, sandbox_root: str) -> None:
         """Refuse a sandbox dir a sandbox could write to.
 
-        The empty file bound over hidden files sits in the sandbox dir
-        beside the state dir. Inside a writable bind a command could
-        replace it with a symlink to a hidden file, and bwrap resolves the
-        bind source on the next spawn, showing the whole secret. Under a
-        hidden path (the default HERMES_HOME/sandboxes) the overlay covers
-        it and nothing in a sandbox can reach it, unless a later bind lands
-        on top of the overlay. The profile home under home_mode=profile
+        Each spawn binds its own state dir read-write at its own path and
+        remounts this directory read-only (build_bwrap_args, late args),
+        and the empty file bound over hidden files lives in the per-user
+        runtime dir, outside every bind a sandbox gets. So a sandbox dir
+        inside a writable path no longer puts a mount source in reach.
+        What it would put in reach is the fallback layout: without a
+        per-user runtime dir (see empty_file_path) the empty file sits
+        beside the state dir, bwrap resolves a mount source on every
+        spawn, and a command could point it at a hidden file to show the
+        secret on the next one. Under a hidden path (the default
+        HERMES_HOME/sandboxes) the overlay covers it and nothing in a
+        sandbox can reach it, unless a later bind lands on top of the
+        overlay. The profile home under home_mode=profile
         is the one such bind, so a sandbox dir under it is refused
         first, whether the profile home is a directory under HERMES_HOME
         or a symlink to a directory outside every hidden path. An operator
@@ -2234,9 +2240,9 @@ class BubblewrapEnvironment(LocalEnvironment):
         """
         if self._config.trust_operator:
             logger.warning(
-                "bubblewrap: %s is on, so the sandbox dir %s is not refused for being writable from "
-                "inside. A command that can write it can also rewrite the empty files bound over the "
-                "hidden paths that are still hidden.",
+                "bubblewrap: %s is on; skipping sandbox directory checks for %s. "
+                "Keep this directory protected: if the per-user runtime directory is unavailable, "
+                "the empty file used to mask hidden files is stored here.",
                 _setting_name(SETTING_TRUST_OPERATOR), sandbox_root,
             )
             return
@@ -2245,8 +2251,9 @@ class BubblewrapEnvironment(LocalEnvironment):
             raise ValueError(
                 f"terminal.sandbox_dir {sandbox_root} lies inside the profile home "
                 f"{profile_home}, which terminal.home_mode={self._config.home_mode} binds "
-                "read-write inside the sandbox with the bubblewrap backend: a command "
-                "could replace the empty file bound over hidden files. Set "
+                "read-write inside the sandbox with the bubblewrap backend: without a per-user "
+                "runtime dir the empty file bound over hidden files falls back beside the state "
+                "dir, where a command could point it at a hidden file. Set "
                 "terminal.sandbox_dir to a directory outside HERMES_HOME/home; the "
                 "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
             )
@@ -2256,8 +2263,9 @@ class BubblewrapEnvironment(LocalEnvironment):
             if _is_within(sandbox_root, root):
                 raise ValueError(
                     f"terminal.sandbox_dir {sandbox_root} lies inside {what} {root}, which is "
-                    "writable inside the sandbox with the bubblewrap backend: a command "
-                    "could replace the empty file bound over hidden files. Set "
+                    "writable inside the sandbox with the bubblewrap backend: without a per-user "
+                    "runtime dir the empty file bound over hidden files falls back beside the "
+                    "state dir, where a command could point it at a hidden file. Set "
                     "terminal.sandbox_dir to a directory outside terminal.cwd and "
                     "outside every read-write plugins.entries.bubblewrap-yuno.settings.binds source; the "
                     "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
