@@ -169,6 +169,7 @@ DEFAULT_MAX_PROCS = 256
 SETTING_PROFILE = "profile"
 SETTING_BINDS = "binds"
 SETTING_AUTO_DEVICES = "auto_devices"
+SETTING_TRUST_OPERATOR = "trust_operator"
 SETTING_MEMORY_MB = "memory_mb"
 SETTING_CPU_SECONDS = "cpu_seconds"
 SETTING_MAX_PROCS = "max_procs"
@@ -240,6 +241,8 @@ class BubblewrapConfig:
     home_allow: tuple[str, ...] = ()
     hide: tuple[str, ...] = ()
     home_default_deny: str = bubblewrap_home.DENY_DOT
+    # Operator-trusted mode: what binds and home_allow name is shown, not hidden.
+    trust_operator: bool = False
 
 
 def _setting_name(key: str) -> str:
@@ -371,6 +374,7 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
     binds = _parse_binds(settings.get(SETTING_BINDS))
     if _parse_bool(SETTING_AUTO_DEVICES, settings.get(SETTING_AUTO_DEVICES), True):
         binds += auto_device_binds(binds)
+    trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
     return BubblewrapConfig(
         profile=profile,
         binds=binds,
@@ -384,6 +388,7 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
             SETTING_HOME_DEFAULT_DENY, settings.get(SETTING_HOME_DEFAULT_DENY),
             (bubblewrap_home.DENY_DOT, bubblewrap_home.DENY_ALL), bubblewrap_home.DENY_DOT,
         ),
+        trust_operator=trust_operator,
     )
 
 
@@ -414,6 +419,73 @@ def operator_hidden_paths(home: str, items: Iterable[str]) -> tuple[str, ...]:
         if real not in resolved:
             resolved.append(real)
     return tuple(resolved)
+
+
+def operator_trusted_paths(home: str, config: "BubblewrapConfig") -> tuple[str, ...]:
+    """Real host paths the operator named in ``binds`` or ``home_allow``.
+
+    Only consulted under ``trust_operator``. The paths an operator names are
+    taken as trusted, so the hidden set stands down for them: a bind of
+    HERMES_HOME or a ``home_allow`` entry such as ``.ssh`` shows the path
+    instead of being dropped, and no overlay is mounted over it.
+    """
+    home = os.path.abspath(os.path.expanduser(home))
+    found: list[str] = []
+    for bind in config.binds:
+        found.append(_real_host_path(bind.src))
+    for item in config.home_allow:
+        text = item.strip()
+        if not text:
+            continue
+        if text == "~" or text.startswith("~/"):
+            text = os.path.join(home, text[2:])
+        found.append(_real_host_path(text if os.path.isabs(text) else os.path.join(home, text)))
+    return tuple(dict.fromkeys(found))
+
+
+def relax_hidden_paths(hidden_paths: Sequence[str], trusted: Sequence[str]) -> tuple[str, ...]:
+    """Drop every hidden path an operator-trusted path covers (itself or a parent of it)."""
+    if not trusted:
+        return tuple(hidden_paths)
+    return tuple(p for p in hidden_paths if not any(_is_within(p, root) for root in trusted))
+
+
+def hidden_paths_for(config: "BubblewrapConfig", home: str, hermes_home: str,
+                     extra: Sequence[str] = (), cached: Sequence[str] | None = None) -> tuple[str, ...]:
+    """The hidden set for this config: sensitive_paths, minus what trust_operator names."""
+    hidden = tuple(cached) if cached is not None else sensitive_paths(home, hermes_home, extra)
+    if not config.trust_operator:
+        return hidden
+    relaxed = relax_hidden_paths(hidden, operator_trusted_paths(home, config))
+    if len(relaxed) != len(hidden):
+        logger.warning(
+            "%s is on: %d path(s) the operator named in binds/home_allow are not hidden",
+            _setting_name(SETTING_TRUST_OPERATOR), len(hidden) - len(relaxed),
+        )
+    return relaxed
+
+
+def operator_trusted_note(config: "BubblewrapConfig") -> str:
+    """One sentence naming the operator-trusted paths, or '' when trust_operator is off."""
+    if not config.trust_operator:
+        return ""
+    home = os.path.realpath(get_real_home() or os.path.expanduser("~"))
+    # Device nodes are bound for the work, not named by the operator in this
+    # sense; listing every /dev/ttyACM* would only add noise.
+    trusted = tuple(p for p in operator_trusted_paths(home, config) if not _is_within(p, "/dev/"))
+    if not trusted:
+        return ""
+    return (
+        f" The operator trusts {', '.join(trusted)}: those paths are not sandbox boundaries, "
+        "so reading or writing them there is expected."
+    )
+
+
+def denied_home_names_for(config: "BubblewrapConfig", home: str) -> tuple[str, ...]:
+    """The home entries the allowlist refuses: none under trust_operator."""
+    if config.trust_operator:
+        return ()
+    return bubblewrap_home.denied_home_names(home)
 
 
 def sensitive_paths(home: str, hermes_home: str, extra: Sequence[str] = ()) -> tuple[str, ...]:
@@ -641,6 +713,8 @@ def bind_guard(
     home_root: str | None,
     home_allow: Sequence[str],
     home_default_deny: str = bubblewrap_home.DENY_DOT,
+    trust_operator: bool = False,
+    trusted_paths: Sequence[str] = (),
 ) -> bubblewrap_binds.BindGuard:
     """The BindGuard for an environment: the hidden set split into credential stores and Hermes homes."""
     homes = tuple(homes)
@@ -652,6 +726,8 @@ def bind_guard(
         home_root=home_root,
         home_allow=tuple(home_allow),
         home_default_deny=home_default_deny,
+        trust_operator=trust_operator,
+        trusted=tuple(trusted_paths),
     )
 
 
@@ -955,8 +1031,7 @@ def build_bwrap_args(
     spawn.
     """
     profile = resolve_profile(config.profile)
-    if hidden_paths is None:
-        hidden_paths = sensitive_paths(home, hermes_home)
+    hidden_paths = hidden_paths_for(config, home, hermes_home, cached=hidden_paths)
     # Resolved first: get_scratch_dir makes the directory, and with it HOME
     # when HERMES_HOME lies under a HOME that does not exist yet.
     if scratch_dir is None:
@@ -966,7 +1041,7 @@ def build_bwrap_args(
     if home_allow is None and home_root is not None:
         home_allow = bubblewrap_home.resolve_allowlist(
             home_root, "", (),
-            denied_names=bubblewrap_home.denied_home_names(home_root), denied_paths=tuple(hidden_paths),
+            denied_names=denied_home_names_for(config, home_root), denied_paths=tuple(hidden_paths),
         )
     if profile_home is _UNRESOLVED:
         profile_home = None
@@ -981,6 +1056,8 @@ def build_bwrap_args(
         guard = bind_guard(
             hidden_paths, hermes_homes(home, hermes_home), writable,
             home_root, home_allow or (), config.home_default_deny,  # type: ignore[arg-type]
+            trust_operator=config.trust_operator,
+            trusted_paths=operator_trusted_paths(home, config) if config.trust_operator else (),
         )
         ca_bundles = ca_bundle_binds(guard)
 
@@ -1516,7 +1593,9 @@ class BubblewrapEnvironment(LocalEnvironment):
         # Resolved once and kept for the life of the environment: the set
         # never follows a symlink swapped in later.
         self._operator_hidden = operator_hidden_paths(self._home, self._config.hide)
-        self._hidden_paths = sensitive_paths(self._home, self._hermes_home, self._operator_hidden)
+        self._hidden_paths = hidden_paths_for(
+            self._config, self._home, self._hermes_home, self._operator_hidden,
+        )
         # HOME is default-deny (home_default_deny). What a sandbox may see is
         # fixed here too: a command cannot widen it by changing PATH.
         self._home_root = bubblewrap_home.resolve_home_root(self._home)
@@ -1530,7 +1609,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         if self._home_root is not None:
             self._home_allow = bubblewrap_home.resolve_allowlist(
                 self._home_root, os.environ.get("PATH", ""), self._config.home_allow,
-                denied_names=bubblewrap_home.denied_home_names(self._home_root),
+                denied_names=denied_home_names_for(self._config, self._home_root),
                 denied_paths=self._hidden_paths,
                 default_deny=self._config.home_default_deny,
             )
@@ -1641,7 +1720,8 @@ class BubblewrapEnvironment(LocalEnvironment):
             home_root = None
         guard = bind_guard(
             self._hidden_paths, hermes_homes(self._home, self._hermes_home), writable, home_root, self._home_allow,
-            self._config.home_default_deny,
+            self._config.home_default_deny, trust_operator=self._config.trust_operator,
+            trusted_paths=operator_trusted_paths(self._home, self._config) if self._config.trust_operator else (),
         )
         kept: list[BindMount] = []
         for bind in self._config.binds:
@@ -2023,6 +2103,14 @@ class BubblewrapEnvironment(LocalEnvironment):
         that maps elsewhere, and a source containing one at its own path
         sits below the overlay.
         """
+        if self._config.trust_operator:
+            logger.warning(
+                "bubblewrap: %s is on, so the sandbox dir %s is not refused for being writable from "
+                "inside. A command that can write it can also rewrite the empty files bound over the "
+                "hidden paths that are still hidden.",
+                _setting_name(SETTING_TRUST_OPERATOR), sandbox_root,
+            )
+            return
         profile_home = os.path.realpath(os.path.join(self._hermes_home, "home"))
         if self._config.home_mode in PROFILE_HOME_MODES and _is_within(sandbox_root, profile_home):
             raise ValueError(

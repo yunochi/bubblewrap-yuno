@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 BACKEND_NAME = "bubblewrap-yuno"
 PROMPT_SECTION_ID = "bubblewrap-yuno-sandbox"
-SETTING_KEYS = ("profile", "binds", "auto_devices", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
+SETTING_KEYS = ("profile", "binds", "auto_devices", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
 
 _PROFILE_CHOICES = (
     ("restricted", "restricted - read-only working directory, no network"),
@@ -193,6 +193,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             writable = ", ".join(extra) + " (the working directory is read-only under this profile)"
         else:
             writable = "nothing (the working directory is read-only under this profile)"
+        trusted_note = sandbox.operator_trusted_note(config) if config is not None else ""
         network = "the host network" if profile.share_net else "no network (loopback only)"
         dot_only = config is None or config.home_default_deny == sandbox.bubblewrap_home.DENY_DOT
         entries = "dot entries" if dot_only else "entries"
@@ -209,7 +210,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             f"each command; it has {network}. A `Read-only file system` error, a missing or empty credential path or a "
             "refused connection is that boundary, not a broken host: report it instead of working around it. "
             "Background processes are not available on this backend: each command's sandbox ends with it. "
-            f"{file_tools}"
+            f"{file_tools}{trusted_note}"
         )
 
 
