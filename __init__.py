@@ -1,7 +1,11 @@
-"""Bubblewrap terminal backend for Hermes Agent (Linux).
+"""Bubblewrap terminal backend for Hermes Agent (Linux) — local fork by yuno.
 
-    hermes plugins install bubblewrap
-    hermes config set terminal.backend bubblewrap
+    hermes config set terminal.backend bubblewrap-yuno
+
+Fork of the official plugin with two hardware-facing changes: binds whose
+source is a device node mount with --dev-bind (a plain --bind lands with nodev
+set, and the kernel refuses to open a device node on a nodev mount), and the
+auto_devices setting binds /dev/ttyACM* and /dev/ttyUSB* present at spawn.
 
 Every ``terminal`` and ``execute_code`` command runs in its own bwrap sandbox on
 this machine, at the same paths: read-only root, writable working directory,
@@ -22,9 +26,9 @@ from agent.terminal_env_provider import TerminalEnvironmentProvider
 
 logger = logging.getLogger(__name__)
 
-BACKEND_NAME = "bubblewrap"
-PROMPT_SECTION_ID = "bubblewrap-sandbox"
-SETTING_KEYS = ("profile", "binds", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
+BACKEND_NAME = "bubblewrap-yuno"
+PROMPT_SECTION_ID = "bubblewrap-yuno-sandbox"
+SETTING_KEYS = ("profile", "binds", "auto_devices", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
 
 _PROFILE_CHOICES = (
     ("restricted", "restricted - read-only working directory, no network"),
@@ -49,10 +53,10 @@ def _terminal_env(name: str, default: str = "") -> str:
 
 
 class BubblewrapProvider(TerminalEnvironmentProvider):
-    """``terminal.backend: bubblewrap``: host paths, every command boxed by bwrap."""
+    """``terminal.backend: bubblewrap-yuno``: host paths, every command boxed by bwrap."""
 
     name = BACKEND_NAME
-    display_name = "Bubblewrap"
+    display_name = "Bubblewrap (yuno)"
     # Commands run on this host at the host's own paths, so Hermes keeps its host hints, host
     # path resolution for the file tools, and the dangerous-command approval prompts: the cwd and
     # any read-write bind are real host directories, so the sandbox is not disposable.
@@ -136,7 +140,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             "SSH keys, cloud credentials and the Hermes home hidden, memory, CPU and process limits per command.",
             "The working directory is the writable set: point terminal.cwd at a project or scratch",
             "directory rather than your home directory.",
-            "Profile: hermes config set plugins.entries.bubblewrap.settings.profile network|workspace|restricted",
+            "Profile: hermes config set plugins.entries.bubblewrap-yuno.settings.profile network|workspace|restricted",
         ]
 
     def post_setup(self) -> None:
@@ -197,7 +201,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             "are hidden and read-only for them, and they share the commands' scratch directory ($TMPDIR)."
         )
         return (
-            f"Terminal sandbox: bubblewrap, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
+            f"Terminal sandbox: bubblewrap-yuno, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
             f"in its own bwrap sandbox on this host with the same paths: the filesystem is read-only except {writable}; "
             f"{entries} of the home directory that are not on the allowlist do not exist, the Hermes home is hidden, "
             "and credential paths below a visible entry appear empty; the Hermes scratch directory ($TMPDIR) is this "
