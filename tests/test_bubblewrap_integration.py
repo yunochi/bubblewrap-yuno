@@ -57,7 +57,7 @@ def isolated_tool(tmp_path, work_dir, monkeypatch, bwrap_provider):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(tmp_path / "sandboxes"))
     monkeypatch.setattr(tt, "_terminal_config_bridge_attempted", True)
-    monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+    monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
     monkeypatch.setenv("TERMINAL_CWD", str(work_dir))
 
     def _clear():
@@ -118,7 +118,7 @@ class TestFactory:
         _provider, settings = bwrap_provider
         settings.update(profile="restricted", memory_mb=512)
         with _no_spawn(monkeypatch):
-            env = _create_environment("bubblewrap", "", str(work_dir), 42)
+            env = _create_environment("bubblewrap-yuno", "", str(work_dir), 42)
         try:
             assert isinstance(env, BubblewrapEnvironment)
             assert env.cwd == str(work_dir)
@@ -129,7 +129,7 @@ class TestFactory:
             env.cleanup()
 
     def test_unknown_backend_error_lists_bubblewrap(self, isolated_tool, work_dir):
-        with pytest.raises(ValueError, match="bubblewrap") as excinfo:
+        with pytest.raises(ValueError, match="bubblewrap-yuno") as excinfo:
             _create_environment("no-such-backend", "", str(work_dir), 10)
         assert "Unknown environment type: no-such-backend" in str(excinfo.value)
 
@@ -165,7 +165,7 @@ class TestFactory:
         # it with every command; the environment starts in the host default and maps it there.
         monkeypatch.chdir(work_dir)
         with _no_spawn(monkeypatch):
-            env = _create_environment("bubblewrap", "", "/nonexistent-root", 10)
+            env = _create_environment("bubblewrap-yuno", "", "/nonexistent-root", 10)
         try:
             assert env.cwd == os.path.realpath(work_dir)
             assert env._replaced_cwd == "/nonexistent-root"
@@ -375,11 +375,14 @@ class TestExecuteCodeDispatch:
              patch.object(cet, "tempfile", local_tmp), \
              patch("tools.process_registry._is_supervised_gateway_process", return_value=False), \
              patch("tools.approval.check_execute_code_guard", return_value={"approved": True}):
-            assert isolated_tool._get_env_config()["env_type"] == "bubblewrap"
+            assert isolated_tool._get_env_config()["env_type"] == "bubblewrap-yuno"
             result = cet.execute_code("print(1)", task_id="dispatch", enabled_tools=["terminal"])
 
         assert result == sentinel
-        remote.assert_called_once_with("print(1)", "dispatch", ["terminal"], reset=False)
+        # Only the dispatch is pinned; core may forward more context (session/turn ids) as kwargs.
+        remote.assert_called_once()
+        assert remote.call_args.args == ("print(1)", "dispatch", ["terminal"])
+        assert remote.call_args.kwargs["reset"] is False
         local_tmp.mkdtemp.assert_not_called()
 
 
