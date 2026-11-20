@@ -30,22 +30,22 @@ class TestClassificationFlags:
         from tools.env_probe import _plugin_backend_is_remote as probe_is_remote
         from tools.terminal_tool_config import _is_container_backend
 
-        assert _is_container_backend("bubblewrap") is False
-        assert _plugin_backend_is_remote("bubblewrap") is False
-        assert probe_is_remote("bubblewrap") is False
+        assert _is_container_backend("bubblewrap-yuno") is False
+        assert _plugin_backend_is_remote("bubblewrap-yuno") is False
+        assert probe_is_remote("bubblewrap-yuno") is False
 
 
 class TestApprovalGate:
     @pytest.mark.parametrize("has_host_access", [True, False])
     def test_container_guards_are_not_skipped(self, has_host_access):
-        assert approval._should_skip_container_guards("bubblewrap", has_host_access) is False
+        assert approval._should_skip_container_guards("bubblewrap-yuno", has_host_access) is False
         assert approval._should_skip_container_guards("local", has_host_access) is False
 
     def test_hardline_command_gets_the_local_verdict(self):
         command = "rm -rf /"
         assert approval.detect_hardline_command(command)[0] is True
         local = approval.check_dangerous_command(command, "local")
-        bubblewrap = approval.check_dangerous_command(command, "bubblewrap")
+        bubblewrap = approval.check_dangerous_command(command, "bubblewrap-yuno")
         assert bubblewrap == local
         assert local["approved"] is False
 
@@ -60,7 +60,7 @@ class TestApprovalGate:
 
         monkeypatch.setattr(approval, "_run_approval_gate", fake_gate)
         local = approval.check_dangerous_command(command, "local")
-        bubblewrap = approval.check_dangerous_command(command, "bubblewrap")
+        bubblewrap = approval.check_dangerous_command(command, "bubblewrap-yuno")
         assert bubblewrap == local == {"approved": False, "message": "gate"}
         assert len(reached) == 2 and reached[0] == reached[1]
         # A sandboxed container backend skips the gate entirely.

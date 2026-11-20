@@ -228,7 +228,7 @@ def isolated_tool(tmp_path, monkeypatch, bwrap_provider):
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.setattr(tt, "_terminal_config_bridge_attempted", True)
-    monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+    monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
 
     def _clear():

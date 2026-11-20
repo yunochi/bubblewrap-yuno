@@ -290,13 +290,13 @@ class TestLoadConfig:
 
     @pytest.mark.parametrize("value", ["not json", "{}", '["/data"]', '[{"dest": "/x"}]', {"src": "/x"}, ["/data"]])
     def test_malformed_binds_raise(self, value):
-        with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.binds"):
+        with pytest.raises(ValueError, match="plugins.entries.bubblewrap-yuno.settings.binds"):
             load_bubblewrap_config({"binds": value})
 
     @pytest.mark.parametrize("name", ["memory_mb", "cpu_seconds", "max_procs"])
     @pytest.mark.parametrize("value", ["abc", "-1", "1.5", -1, True])
     def test_bad_limits_raise(self, name, value):
-        with pytest.raises(ValueError, match=f"plugins.entries.bubblewrap.settings.{name}"):
+        with pytest.raises(ValueError, match=f"plugins.entries.bubblewrap-yuno.settings.{name}"):
             load_bubblewrap_config({name: value})
 
     def test_home_default_deny_defaults_to_dot_and_is_normalized(self):

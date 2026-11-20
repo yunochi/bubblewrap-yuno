@@ -58,7 +58,7 @@ def _isolated_hermes_home(tmp_path, monkeypatch):
 def bwrap_provider():
     """The plugin's provider in the global terminal backend registry, as ``register(ctx)`` leaves it.
 
-    Yields ``(provider, settings)``: *settings* stands in for ``plugins.entries.bubblewrap.settings``
+    Yields ``(provider, settings)``: *settings* stands in for ``plugins.entries.bubblewrap-yuno.settings``
     and is read on every environment construction, like ``ctx.get_config``.
     """
     import agent.terminal_env_registry as registry

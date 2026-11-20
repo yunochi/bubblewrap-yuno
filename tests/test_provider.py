@@ -27,11 +27,11 @@ def hermes_home(tmp_path, monkeypatch):
 
 
 def _install(home: Path, settings: dict | None = None) -> None:
-    shutil.copytree(_ROOT, home / "plugins" / "bubblewrap",
+    shutil.copytree(_ROOT, home / "plugins" / "bubblewrap-yuno",
                     ignore=shutil.ignore_patterns("tests", "__pycache__", ".pytest_cache"))
-    config = {"plugins": {"enabled": ["bubblewrap"]}}
+    config = {"plugins": {"enabled": ["bubblewrap-yuno"]}}
     if settings:
-        config["plugins"]["entries"] = {"bubblewrap": {"settings": settings}}
+        config["plugins"]["entries"] = {"bubblewrap-yuno": {"settings": settings}}
     # JSON is YAML; core's test env does not ship PyYAML.
     (home / "config.yaml").write_text(json.dumps(config))
 
@@ -42,26 +42,26 @@ def discovered(hermes_home):
     import agent.terminal_env_registry as registry
     from hermes_cli.plugins import PluginManager
 
-    previous = registry.snapshot_registration("bubblewrap")
+    previous = registry.snapshot_registration("bubblewrap-yuno")
     manager = PluginManager()
 
     def load(settings=None):
         _install(hermes_home, settings)
         manager.discover_and_load(force=True)
-        return manager, registry.get_provider("bubblewrap")
+        return manager, registry.get_provider("bubblewrap-yuno")
 
     try:
         yield load
     finally:
-        current = registry.snapshot_registration("bubblewrap")
+        current = registry.snapshot_registration("bubblewrap-yuno")
         if current is not None:
-            registry.restore_registration("bubblewrap", current, previous)
+            registry.restore_registration("bubblewrap-yuno", current, previous)
 
 
 class TestProvider:
     def test_identity_and_flags(self):
         provider = plugin.BubblewrapProvider()
-        assert provider.name == "bubblewrap"
+        assert provider.name == "bubblewrap-yuno"
         assert provider.is_remote is False
         assert provider.is_container is False
         assert provider.skip_container_guards is False
@@ -84,8 +84,8 @@ class TestDiscovery:
         manager, provider = discovered()
         # Loaded under the loader's own package name, so compare by class name, not identity.
         assert type(provider).__name__ == "BubblewrapProvider"
-        assert provider.name == "bubblewrap"
-        assert "bubblewrap-sandbox" in manager._system_prompt_sections
+        assert provider.name == "bubblewrap-yuno"
+        assert "bubblewrap-yuno-sandbox" in manager._system_prompt_sections
 
     def test_settings_come_from_the_profile_config(self, discovered, monkeypatch):
         _manager, provider = discovered({"profile": "restricted", "memory_mb": 512,
@@ -100,25 +100,25 @@ class TestDiscovery:
 
     def test_prompt_note_follows_the_backend_and_the_profile(self, discovered, monkeypatch):
         manager, _provider = discovered({"profile": "workspace"})
-        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
         sections = {s.id: s.content for s in manager.render_system_prompt_sections({})}
-        note = sections["bubblewrap-sandbox"]
+        note = sections["bubblewrap-yuno-sandbox"]
         assert "profile `workspace`" in note
         assert "no network" in note
         assert "; dot entries of the home directory that are not on the allowlist do not exist" in note
         assert "Background processes are not available" in note
         monkeypatch.setenv("TERMINAL_ENV", "local")
-        assert "bubblewrap-sandbox" not in {s.id for s in manager.render_system_prompt_sections({})}
+        assert "bubblewrap-yuno-sandbox" not in {s.id for s in manager.render_system_prompt_sections({})}
 
     @pytest.mark.parametrize("native", [None, "1", "0"])
     def test_prompt_note_says_where_the_file_tools_run(self, discovered, monkeypatch, native):
         manager, _provider = discovered({})
-        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
         if native is None:
             monkeypatch.delenv("HERMES_NATIVE_FILE_READ", raising=False)
         else:
             monkeypatch.setenv("HERMES_NATIVE_FILE_READ", native)
-        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-sandbox"]
+        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-yuno-sandbox"]
         assert "`search_files` run through this sandbox too" in note
         assert "they share the commands' scratch directory ($TMPDIR)" in note
         assert "do not run in this sandbox" not in note
@@ -126,20 +126,20 @@ class TestDiscovery:
 
     def test_home_default_deny_reaches_the_config_and_the_prompt_note(self, discovered, monkeypatch):
         manager, provider = discovered({"home_default_deny": "all"})
-        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
         assert provider.load_config().home_default_deny == "all"
-        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-sandbox"]
+        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-yuno-sandbox"]
         assert "; entries of the home directory that are not on the allowlist do not exist" in note
 
     def test_the_prompt_note_survives_a_bad_home_default_deny(self, discovered, monkeypatch):
         manager, _provider = discovered({"home_default_deny": "none"})
-        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
-        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-sandbox"]
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
+        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-yuno-sandbox"]
         assert "; dot entries of the home directory that are not on the allowlist do not exist" in note
 
     def test_bad_settings_name_the_setting(self, discovered):
         _manager, provider = discovered({"memory_mb": "lots"})
-        with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.memory_mb"):
+        with pytest.raises(ValueError, match="plugins.entries.bubblewrap-yuno.settings.memory_mb"):
             provider.load_config()
 
     def test_each_profile_reads_its_own_settings(self, discovered, tmp_path, monkeypatch):
@@ -148,16 +148,16 @@ class TestDiscovery:
         assert (provider.load_config().profile, provider.load_config().memory_mb) == ("restricted", 512)
         other = tmp_path / "other-profile"
         other.mkdir()
-        (other / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["bubblewrap"], "entries": {
-            "bubblewrap": {"settings": {"profile": "workspace", "memory_mb": 2048}}}}}))
+        (other / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["bubblewrap-yuno"], "entries": {
+            "bubblewrap-yuno": {"settings": {"profile": "workspace", "memory_mb": 2048}}}}}))
         monkeypatch.setenv("HERMES_HOME", str(other))
         assert (provider.load_config().profile, provider.load_config().memory_mb) == ("workspace", 2048)
 
     def test_prompt_note_names_extra_writable_paths(self, discovered, monkeypatch):
         manager, _provider = discovered({"profile": "restricted",
                                          "binds": [{"src": "/srv/out", "readonly": False}, {"src": "/srv/ref"}]})
-        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap-yuno")
         monkeypatch.setenv("TERMINAL_HOME_MODE", "profile")
-        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-sandbox"]
+        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-yuno-sandbox"]
         assert "read-only except /srv/out, the profile home ($HOME) (the working directory is read-only" in note
         assert "/srv/ref" not in note
