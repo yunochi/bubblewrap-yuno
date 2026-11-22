@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.2
+version: 1.5.1+yuno.3
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
@@ -15,7 +15,10 @@ description: >
   EACCES, so /dev/ttyACM0 would be visible but unusable), and auto_devices binds
   /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time, and trust_operator
   (off by default) which makes paths the operator names in binds/home_allow win
-  over the hidden set instead of being silently dropped.
+  over the hidden set instead of being silently dropped. The empty file bound
+  over the hidden file paths now lives in the per-user runtime dir
+  (/run/user/<uid>/hermes-bwrap-empty), outside every bind a sandbox gets, so a
+  writable HOME cannot be used to swap it for a link to a secret.
   Select it with `hermes config set terminal.backend bubblewrap-yuno`.
 requires_hermes: ">=0.22.6"
 platforms: [linux]
