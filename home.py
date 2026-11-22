@@ -199,8 +199,8 @@ ALLOWED_HOME_ENTRIES: tuple[str, ...] = (
     ".local/share/mime",
 )
 
-ALLOW_KEY = "plugins.entries.bubblewrap.settings.home_allow"
-DENY_KEY = "plugins.entries.bubblewrap.settings.home_default_deny"
+ALLOW_KEY = "plugins.entries.bubblewrap-yuno.settings.home_allow"
+DENY_KEY = "plugins.entries.bubblewrap-yuno.settings.home_default_deny"
 DENY_DOT = "dot"
 DENY_ALL = "all"
 
