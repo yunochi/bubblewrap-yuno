@@ -887,10 +887,11 @@ class TestHideKey:
 
 
 class TestSandboxDirGuard:
-    """A sandbox dir a sandbox could write to is refused at construction: the
-    empty file bound over hidden files lives beside the state dir, and a
-    sandbox that can replace it with a symlink would choose the next
-    spawn's bind source."""
+    """A sandbox dir a sandbox could write to is refused at construction: each
+    spawn binds only its own state dir read-write and remounts the parent
+    read-only, and without a per-user runtime dir the empty file bound over
+    hidden files falls back into that directory, where a command could point
+    it at a hidden file."""
 
     @pytest.mark.parametrize("profile", ["workspace", "network"])
     def test_sandbox_dir_under_a_writable_cwd_is_refused(self, tmp_path, work_dir, monkeypatch, profile):
@@ -909,6 +910,19 @@ class TestSandboxDirGuard:
             assert Path(env.get_temp_dir()).parent == root
         finally:
             env.cleanup()
+
+    def test_trust_operator_skips_the_refusal_and_warns(self, work_dir, monkeypatch, caplog):
+        root = work_dir / "sandboxes"
+        monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(root))
+        config = BubblewrapConfig(profile="workspace", trust_operator=True)
+        with _no_session(), caplog.at_level(logging.WARNING):
+            env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
+        try:
+            assert Path(env.get_temp_dir()).parent == root
+        finally:
+            env.cleanup()
+        assert any(f"skipping sandbox directory checks for {root}" in record.getMessage()
+                   for record in caplog.records)
 
     def test_sandbox_dir_under_a_rw_operator_bind_is_refused_and_under_a_ro_bind_constructs(self, tmp_path, work_dir, monkeypatch):
         shared = tmp_path / "shared"

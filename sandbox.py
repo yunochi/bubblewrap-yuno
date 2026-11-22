@@ -229,6 +229,7 @@ class BindMount:
     dest: str
     readonly: bool = True
     auto: bool = False
+    auto_mode: int = 0  # File type sampled by glob expansion and rechecked during validation.
 
 
 @dataclass(frozen=True)
@@ -349,21 +350,18 @@ def _parse_bool(key: str, raw: object, default: bool) -> bool:
 
 def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                     kind: str = "device") -> tuple[BindMount, ...]:
-    """BindMounts for the host paths the globs match now, minus the ones already bound.
+    """BindMounts for the current matches, excluding paths already bound.
 
-    Read at every config load, which the backend does per spawn: a board plugged
-    in after startup is picked up by the next command, and one unplugged simply
-    stops being bound. *patterns* is the operator's auto_bind_globs setting.
+    *patterns* is the configured list, evaluated afresh for each launch.
     kind="device" takes only character and block nodes, which keeps a stale
     symlink or a file out of the mount list; kind="any" takes whatever matched,
     directories included, because an operator who names a pattern means it.
     A glob that matches nothing adds nothing. A match whose real path is
-    already bound (explicitly or by an earlier pattern) is skipped: a by-id
+    explicitly bound is skipped: a by-id
     symlink resolves to the node, which is what the tool opens anyway, and the
     alias path itself has no parent inside the sandbox's fresh /dev.
     """
-    covered = {os.path.realpath(bind.src) for bind in binds}
-    covered |= {os.path.realpath(bind.dest) for bind in binds}
+    covered = {path for bind in binds for path in (bind.src, bind.dest)}
     found: list[BindMount] = []
     for pattern in patterns:
         for matched in sorted(glob.glob(pattern)):
@@ -373,13 +371,6 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                 continue
             if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
                 continue
-            if stat.S_ISDIR(mode):
-                # A directory pulls its whole tree in read-write; say so once per
-                # spawn instead of refusing it, since the operator named the glob.
-                logger.warning(
-                    "%s pattern %s auto-binds the directory %s read-write", 
-                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
-                )
             real = os.path.realpath(matched)
             if real in covered:
                 # e.g. /dev/serial/by-id/usb-... resolving to /dev/ttyACM0 that
@@ -390,8 +381,7 @@ def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
                     "auto_bind_globs: %s resolves to %s, already bound", matched, real,
                 )
                 continue
-            covered.add(real)
-            found.append(BindMount(src=real, dest=matched, readonly=False, auto=True))
+            found.append(BindMount(src=real, dest=matched, readonly=False, auto=True, auto_mode=stat.S_IFMT(mode)))
     return tuple(found)
 
 
@@ -413,8 +403,6 @@ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mo
         SETTING_AUTO_BIND_GLOBS_TYPE, settings.get(SETTING_AUTO_BIND_GLOBS_TYPE),
         AUTO_BIND_TYPES, DEFAULT_AUTO_BIND_TYPE,
     )
-    if auto_globs:
-        binds += auto_glob_binds(binds, auto_globs, auto_kind)
     trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
     return BubblewrapConfig(
         profile=profile,
@@ -669,14 +657,20 @@ def bind_mount_flag(bind: "BindMount") -> str:
     mount, and the kernel refuses to open a device node on a nodev mount with
     EACCES: /dev/ttyACM0 would show up at its path, list as crw-rw-rw-, and
     fail on open. ``--dev-bind`` keeps device access, and has no read-only
-    form, so a read-only device is remounted read-only right after it mounts.
+    form. A read-only mount cannot enforce read-only device I/O.
     """
-    try:
-        mode = os.stat(bind.src).st_mode
-    except OSError:
-        mode = 0
+    mode = bind.auto_mode
+    if not bind.auto:
+        try:
+            mode = os.stat(bind.src).st_mode
+        except OSError:
+            mode = 0
     if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
-        return "--dev-bind"
+        if bind.readonly:
+            raise ValueError(f"Read-only device bind {bind.src} is unsupported: omit the bind or set readonly: false to grant device control.")
+        return "--dev-bind-try" if bind.auto else "--dev-bind"
+    if bind.auto:
+        return "--bind-try"
     return "--ro-bind" if bind.readonly else "--bind"
 
 
@@ -703,16 +697,19 @@ def dot_link_entries(home_root: str, name: str) -> list[str]:
     out. A chain longer than the kernel allows resolves to nothing on the
     host, so the walk stops there.
     """
-    entries: list[str] = []
     # *name* may be nested (.config/nvim): a relative target starts at the link's own directory.
     current = os.path.dirname(os.path.join(home_root, name))
     try:
         pending = os.readlink(os.path.join(home_root, name)).split(os.sep)
     except OSError:
-        return entries
+        return []
     if pending and pending[0] == "":
         current = os.sep
-    hops = 1
+    return _walk_link_entries(current, pending, hops=1)
+
+
+def _walk_link_entries(current: str, pending: list[str], *, hops: int = 0) -> list[str]:
+    entries: list[str] = []
     while pending:
         part = pending.pop(0)
         if part in ("", "."):
@@ -738,6 +735,24 @@ def dot_link_entries(home_root: str, name: str) -> list[str]:
         else:
             break
     return entries
+
+
+def home_dot_symlinks(root: str) -> list[str]:
+    """HOME symlinks whose targets must not become writable through a bind."""
+    names: list[str] = []
+    for parent in ("", *bubblewrap_home.DEFAULT_DENY_DIRS):
+        directory = os.path.join(root, parent)
+        if parent and (os.path.islink(directory) or not os.path.isdir(directory)):
+            continue
+        try:
+            listing = os.listdir(directory)
+        except OSError:
+            continue
+        names.extend(sorted(
+            os.path.join(parent, name) for name in listing
+            if (parent or name.startswith(".")) and os.path.islink(os.path.join(directory, name))
+        ))
+    return names
 
 
 def runtime_overlay_args(state_dir: str, uid: int) -> list[str]:
@@ -1123,7 +1138,8 @@ def build_bwrap_args(
     spawn.
     """
     profile = resolve_profile(config.profile)
-    hidden_paths = hidden_paths_for(config, home, hermes_home, cached=hidden_paths)
+    hidden_paths = (hidden_paths_for(config, home, hermes_home)
+                    if hidden_paths is None else tuple(hidden_paths))
     # Resolved first: get_scratch_dir makes the directory, and with it HOME
     # when HERMES_HOME lies under a HOME that does not exist yet.
     if scratch_dir is None:
@@ -1187,14 +1203,6 @@ def build_bwrap_args(
         ("--bind-try" if profile.writable_cwd else "--ro-bind-try", initial_cwd, initial_cwd),
     ]
     mounts += [(bind_mount_flag(bind), bind.src, bind.dest) for bind in binds]
-    # --dev-bind has no read-only form: a read-only device bind is mounted by
-    # it and then remounted read-only, after every operator bind has landed.
-    remount_ro: list[str] = [
-        token
-        for bind in binds
-        if bind.readonly and bind_mount_flag(bind) == "--dev-bind"
-        for token in ("--remount-ro", bind.dest)
-    ]
     writable = [(initial_cwd, initial_cwd)] if profile.writable_cwd else []
     writable += [(bind.src, bind.dest) for bind in binds if not bind.readonly]
     mount_points = [initial_cwd, *(bind.dest for bind in binds)]
@@ -1216,7 +1224,6 @@ def build_bwrap_args(
     if home_root is None:
         for mount in mounts:
             argv += mount
-        argv += remount_ro
         # Pin the parents of the hidden paths that sit inside a writable bind
         # (see ancestor_pin_args) after those binds, so the pins land on top
         # of them, and before the overlays, so the overlays land on the pins.
@@ -1264,7 +1271,6 @@ def build_bwrap_args(
         for mount in mounts:
             if not in_home(mount[2]):
                 argv += mount
-        argv += remount_ro
         argv += bubblewrap_home.home_layout_args(
             root,
             units,
@@ -1628,6 +1634,7 @@ BACKGROUND_LAUNCH_REFUSAL = (
 # change between constructions; a source one sandbox may read must not lie
 # where another can swap it. Kept for the life of the process.
 _WRITABLE_ROOTS: dict[str, set[str]] = {}
+_FIXED_MOUNT_PATHS: dict[str, set[str]] = {}
 _WRITABLE_ROOTS_LOCK = threading.Lock()
 
 
@@ -1708,9 +1715,9 @@ class BubblewrapEnvironment(LocalEnvironment):
         self._scratch_dir: str | None = resolve_scratch_dir(self._hermes_home)
         # The operator binds are filtered, their sources expanded and their
         # destinations resolved once here, like the hidden set and the cwd,
-        # so the mount paths are fixed for the life of the environment
+        # so their mount paths are fixed for the life of the environment
         # and a dropped bind warns once; the builder's own filter
-        # then drops nothing.
+        # then drops nothing. Auto matches are resolved per spawn.
         self._config = replace(
             self._config,
             binds=tuple(resolve_bind_dests(expand_bind_srcs(filter_binds(self._config.binds, self._hidden_paths)))),
@@ -1737,6 +1744,11 @@ class BubblewrapEnvironment(LocalEnvironment):
             self._check_sandbox_root(sandbox_root)
             self._validate_host_binds(sandbox_root)
             _WRITABLE_ROOTS.setdefault(self._hermes_home, set()).update(own)
+            fixed = _FIXED_MOUNT_PATHS.setdefault(self._hermes_home, set())
+            fixed.update(path for bind in self._config.binds for path in (bind.src, bind.dest))
+            fixed.update(path for pair in self._ca_bundles for path in pair)
+            fixed.update(self._profile_home_bind or ())
+            fixed.update(path for path in (self._initial_cwd, self._scratch_dir, sandbox_root, empty_file_dir()) if path)
         # Hidden but for this environment's state dir, unless a hidden path
         # covers it already (the default HERMES_HOME/sandboxes).
         self._sandbox_root: str | None = (
@@ -1750,6 +1762,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         # Read-only and outside the state dir: nothing in a sandbox can
         # write to what shows at the hidden file paths.
         self._empty_file = empty_file_path(self._state_dir)
+        self._check_empty_file_reachable()
         try:
             self._make_private_scratch()
         except BaseException:
@@ -1814,6 +1827,9 @@ class BubblewrapEnvironment(LocalEnvironment):
             self._config.home_default_deny, trust_operator=self._config.trust_operator,
             trusted_paths=operator_trusted_paths(self._home, self._config) if self._config.trust_operator else (),
         )
+        # Kept for _spawn_binds: a glob match appears after construction, so it
+        # is checked against the same guard on every spawn.
+        self._guard = guard
         kept: list[BindMount] = []
         for bind in self._config.binds:
             label = f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest}"
@@ -2029,21 +2045,7 @@ class BubblewrapEnvironment(LocalEnvironment):
                 profile_home = os.path.realpath(candidate)
         if not sources and profile_home is None:
             return
-        # The top of HOME and each default-deny directory (a stow-style
-        # ~/.config/nvim link counts as much as ~/.bashrc).
-        names: list[str] = []
-        for parent in ("", *bubblewrap_home.DEFAULT_DENY_DIRS):
-            directory = os.path.join(root, parent)
-            if parent and (os.path.islink(directory) or not os.path.isdir(directory)):
-                continue
-            try:
-                listing = os.listdir(directory)
-            except OSError:
-                continue
-            names += sorted(
-                os.path.join(parent, name) for name in listing
-                if (parent or name.startswith(".")) and os.path.islink(os.path.join(directory, name))
-            )
+        names = home_dot_symlinks(root)
 
         def writable(entry: str, last: bool) -> bool:
             if profile_home is not None and _is_within(entry, profile_home) and (last or entry != profile_home):
@@ -2194,16 +2196,49 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "a project directory as terminal.cwd."
                 )
 
+    def _check_empty_file_reachable(self) -> None:
+        """Refuse a bind that puts the empty file bound over hidden files in reach.
+
+        That file is a mount source bwrap resolves on every spawn, so a command
+        that can write it could point it at a secret. Three things make a swap
+        impractical today: the name carries a per-spawn uuid, the file is made
+        in this process immediately before the mount, and anything but a regular
+        file at that path is unlinked first. None of that is a property worth
+        relying on, so the configuration that makes the file reachable at all is
+        refused: a read-write bind whose source covers its directory (typically
+        the per-user runtime dir or the empty-file directory itself). A
+        read-only bind shows an empty file and nothing else.
+        """
+        empty_dir = os.path.realpath(os.path.dirname(self._empty_file))
+        for bind in self._config.binds:
+            if bind.readonly:
+                continue
+            for path in (bind.src, bind.dest):
+                real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+                if _is_within(empty_dir, real):
+                    raise ValueError(
+                        f"{_setting_name(SETTING_BINDS)} entry {bind.src} -> {bind.dest} is read-write and "
+                        f"covers {empty_dir}, where the empty file bound over hidden files lives: a command "
+                        "could replace it and make the next spawn show a hidden file. Bind that directory "
+                        "read-only, or drop the entry."
+                    )
+
     def _check_sandbox_root(self, sandbox_root: str) -> None:
         """Refuse a sandbox dir a sandbox could write to.
 
-        The empty file bound over hidden files sits in the sandbox dir
-        beside the state dir. Inside a writable bind a command could
-        replace it with a symlink to a hidden file, and bwrap resolves the
-        bind source on the next spawn, showing the whole secret. Under a
-        hidden path (the default HERMES_HOME/sandboxes) the overlay covers
-        it and nothing in a sandbox can reach it, unless a later bind lands
-        on top of the overlay. The profile home under home_mode=profile
+        Each spawn binds its own state dir read-write at its own path and
+        remounts this directory read-only (build_bwrap_args, late args),
+        and the empty file bound over hidden files lives in the per-user
+        runtime dir, outside every bind a sandbox gets. So a sandbox dir
+        inside a writable path no longer puts a mount source in reach.
+        What it would put in reach is the fallback layout: without a
+        per-user runtime dir (see empty_file_path) the empty file sits
+        beside the state dir, bwrap resolves a mount source on every
+        spawn, and a command could point it at a hidden file to show the
+        secret on the next one. Under a hidden path (the default
+        HERMES_HOME/sandboxes) the overlay covers it and nothing in a
+        sandbox can reach it, unless a later bind lands on top of the
+        overlay. The profile home under home_mode=profile
         is the one such bind, so a sandbox dir under it is refused
         first, whether the profile home is a directory under HERMES_HOME
         or a symlink to a directory outside every hidden path. An operator
@@ -2214,9 +2249,9 @@ class BubblewrapEnvironment(LocalEnvironment):
         """
         if self._config.trust_operator:
             logger.warning(
-                "bubblewrap: %s is on, so the sandbox dir %s is not refused for being writable from "
-                "inside. A command that can write it can also rewrite the empty files bound over the "
-                "hidden paths that are still hidden.",
+                "bubblewrap: %s is on; skipping sandbox directory checks for %s. "
+                "Keep this directory protected: if the per-user runtime directory is unavailable, "
+                "the empty file used to mask hidden files is stored here.",
                 _setting_name(SETTING_TRUST_OPERATOR), sandbox_root,
             )
             return
@@ -2225,8 +2260,9 @@ class BubblewrapEnvironment(LocalEnvironment):
             raise ValueError(
                 f"terminal.sandbox_dir {sandbox_root} lies inside the profile home "
                 f"{profile_home}, which terminal.home_mode={self._config.home_mode} binds "
-                "read-write inside the sandbox with the bubblewrap backend: a command "
-                "could replace the empty file bound over hidden files. Set "
+                "read-write inside the sandbox with the bubblewrap backend: without a per-user "
+                "runtime dir the empty file bound over hidden files falls back beside the state "
+                "dir, where a command could point it at a hidden file. Set "
                 "terminal.sandbox_dir to a directory outside HERMES_HOME/home; the "
                 "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
             )
@@ -2236,8 +2272,9 @@ class BubblewrapEnvironment(LocalEnvironment):
             if _is_within(sandbox_root, root):
                 raise ValueError(
                     f"terminal.sandbox_dir {sandbox_root} lies inside {what} {root}, which is "
-                    "writable inside the sandbox with the bubblewrap backend: a command "
-                    "could replace the empty file bound over hidden files. Set "
+                    "writable inside the sandbox with the bubblewrap backend: without a per-user "
+                    "runtime dir the empty file bound over hidden files falls back beside the "
+                    "state dir, where a command could point it at a hidden file. Set "
                     "terminal.sandbox_dir to a directory outside terminal.cwd and "
                     "outside every read-write plugins.entries.bubblewrap-yuno.settings.binds source; the "
                     "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
@@ -2311,9 +2348,93 @@ class BubblewrapEnvironment(LocalEnvironment):
             )
         return result
 
+    def _spawn_binds(self) -> tuple[BindMount, ...]:
+        """Refresh optional matches without changing fixed mounts or hidden paths."""
+        binds = self._config.binds
+        if not self._config.auto_bind_globs:
+            return binds
+        matches = auto_glob_binds(binds, self._config.auto_bind_globs, self._config.auto_bind_globs_type)
+        if not matches:
+            return binds
+
+        fresh = list(binds)
+        with _WRITABLE_ROOTS_LOCK:
+            known_roots = _WRITABLE_ROOTS.setdefault(self._hermes_home, set())
+            writable = set(self._guard.writable) | known_roots
+            fixed = _FIXED_MOUNT_PATHS[self._hermes_home]
+            # Directories are writable trees. Do not let a new match overlap
+            # a fixed mount or unhide a protected subtree (even an absent one).
+            masks = set(self._hidden_paths) | {
+                os.path.dirname(self._empty_file), self._hermes_home, "/proc",
+                f"/run/user/{os.getuid()}", *(_real_host_path(path) for path in DOCKER_SOCKETS),
+            }
+            protected = fixed | masks
+            private_mounts = ("/tmp", "/dev")
+            readonly_paths = {path for bind in binds if bind.readonly for path in (bind.src, bind.dest)}
+            dot_paths: set[str] = set()
+            dot_tree_targets: set[str] = set()
+            for name in home_dot_symlinks(self._home):
+                chain = dot_link_entries(self._home, name)
+                dot_paths.update(chain)
+                if chain and os.path.isdir(chain[-1]):
+                    dot_tree_targets.add(chain[-1])
+            accepted: set[str] = set()
+            guard = replace(self._guard, writable=tuple(sorted(writable)), trust_operator=False)
+            # A directory changes the writable roots for every leaf in this argv.
+            for bind in sorted(matches, key=lambda item: not stat.S_ISDIR(item.auto_mode)):
+                if bind.src in accepted:
+                    continue
+                match = os.path.abspath(bind.dest)
+                real, reason = bubblewrap_binds.bind_refusal(match, guard, kind=bubblewrap_binds.ANY)
+                mode = 0
+                if reason is None:
+                    try:
+                        mode = os.stat(real).st_mode
+                    except OSError:
+                        reason = "the source disappeared while resolving it"
+                if reason is None and (real != bind.src or stat.S_IFMT(mode) != bind.auto_mode):
+                    reason = "the match changed while resolving it"
+                if reason is None and real != match:
+                    chain = _walk_link_entries(os.sep, match.split(os.sep))
+                    if not chain or chain[-1] != real:
+                        reason = "the match changed while checking its symlink chain"
+                    elif any(entry != root and _is_within(entry, root) for entry in chain for root in writable):
+                        reason = "the match resolves through a path a sandbox can replace"
+                if reason is None and any(_is_within(real, path) for path in masks):
+                    reason = "the match is inside a protected path"
+                if reason is None and any(_is_within(real, path) for path in readonly_paths):
+                    reason = "the match would override an explicit read-only bind"
+                if reason is None and (any(_is_within(entry, real) for entry in dot_paths)
+                                       or any(_is_within(real, root) for root in dot_tree_targets)):
+                    reason = "the match would make a HOME dot symlink target writable"
+                if reason is None and stat.S_ISDIR(mode):
+                    if any(_is_within(real, path) or _is_within(path, real) for path in protected):
+                        reason = "the directory overlaps a fixed mount or protected path"
+                    elif any(real != path and (_is_within(real, path) or _is_within(path, real)) for path in writable):
+                        reason = "the directory overlaps another writable root"
+                    elif any(_is_within(path, real) for path in (self._home, *private_mounts)):
+                        reason = "the directory covers HOME or a private mount"
+                if reason is not None:
+                    logger.warning(
+                        "bubblewrap: not auto-binding %s (%s matched it): %s",
+                        match, _setting_name(SETTING_AUTO_BIND_GLOBS), reason,
+                    )
+                    continue
+                if stat.S_ISDIR(mode):
+                    # Keep the root in the guard even after it stops matching:
+                    # a command with the earlier mount can still be running.
+                    if real not in known_roots:
+                        logger.warning("bubblewrap: auto-binding directory %s read-write", real)
+                    known_roots.add(real)
+                    writable.add(real)
+                    guard = replace(guard, writable=tuple(sorted(writable)))
+                accepted.add(real)
+                fresh.append(replace(bind, dest=real))
+        return tuple(fresh)
+
     def _bwrap_prefix(self, tracked_cwd: str) -> list[str]:
         return build_bwrap_args(
-            self._config,
+            replace(self._config, binds=self._spawn_binds()),
             self._initial_cwd,
             self._state_dir,
             self._home,
