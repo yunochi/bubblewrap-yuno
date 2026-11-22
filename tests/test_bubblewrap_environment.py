@@ -178,6 +178,17 @@ class TestSandboxIntegration:
         assert Path(env._snapshot_path).is_file()
         assert Path(env._snapshot_path).parent == Path(env.get_temp_dir())
 
+    def test_secret_export_reaches_the_next_command_but_never_the_snapshot_file(self, env):
+        # Cores with an in-memory secret channel (LocalEnvironment._secret_handoff) hand the shell
+        # its pipes as fds; the sandbox passes them through bwrap. Hermes 0.23 keeps exports in the
+        # snapshot file, so only the carry-over holds there.
+        assert env.execute("export HERMES_PROBE_TOKEN=s3cr3t-probe")["returncode"] == 0
+        result = env.execute('printf %s "$HERMES_PROBE_TOKEN"')
+        assert result["returncode"] == 0, result["output"]
+        assert result["output"].strip() == "s3cr3t-probe"
+        if getattr(env, "_secret_handoff", None) is not None:
+            assert "s3cr3t-probe" not in Path(env._snapshot_path).read_text()
+
     def test_pid_namespace_hides_host_processes(self, env):
         host = len([p for p in os.listdir("/proc") if p.isdigit()])
         result = env.execute("ls /proc | grep -c '^[0-9]'")
@@ -354,7 +365,7 @@ class TestConstructionTimeMounts:
         # ever comes from inside a sandbox.
         assert params == ["config", "initial_cwd", "state_dir", "home", "hermes_home", "tracked_cwd", "bwrap_path",
                           "hidden_paths", "home_root", "home_allow", "ca_bundles", "scratch_dir",
-                          "scratch_private", "profile_home", "sandbox_root"]
+                          "scratch_private", "profile_home", "sandbox_root", "staged_inputs"]
 
     def test_chdir_follows_tracked_cwd_with_fixed_mounts(self, sandbox_root, work_dir):
         home = os.path.expanduser("~")
@@ -779,7 +790,7 @@ class TestHomeAllowKey:
 
     @pytest.mark.parametrize("value", ["not json", '{"a": 1}', "[1, 2]", '"one string"', [1, 2], {"a": 1}])
     def test_loader_rejects_a_malformed_value_and_names_the_setting(self, value):
-        with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.home_allow"):
+        with pytest.raises(ValueError, match="plugins.entries.bubblewrap-yuno.settings.home_allow"):
             load_bubblewrap_config({"home_allow": value})
 
     def test_allow_items_make_their_entries_visible(self, sandbox_root, work_dir, fake_home):
@@ -850,7 +861,7 @@ class TestHideKey:
 
     @pytest.mark.parametrize("value", ["not json", '{"a": 1}', "[1, 2]", '"one string"', [1, 2], {"a": 1}])
     def test_loader_rejects_a_malformed_value_and_names_the_setting(self, value):
-        with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.hide"):
+        with pytest.raises(ValueError, match="plugins.entries.bubblewrap-yuno.settings.hide"):
             load_bubblewrap_config({"hide": value})
 
     def test_hide_items_join_the_hidden_set(self, sandbox_root, work_dir, fake_home):
@@ -1365,7 +1376,7 @@ class TestAbsentDeniedPathGuard:
         with _no_session(), pytest.raises(ValueError) as exc:
             BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=self._rw(config_dir))
         assert str(config_dir / "gh") in str(exc.value)
-        assert "plugins.entries.bubblewrap.settings.binds" in str(exc.value)
+        assert "plugins.entries.bubblewrap-yuno.settings.binds" in str(exc.value)
         assert str(config_dir) in str(exc.value)
         assert not sandbox_root.exists() or not any(sandbox_root.iterdir())
 
@@ -1601,7 +1612,7 @@ class TestBindsFrozenAtConstruction:
         with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"), _no_session():
             env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
         try:
-            dropped = [r.getMessage() for r in caplog.records if "Ignoring plugins.entries.bubblewrap.settings.binds" in r.getMessage()]
+            dropped = [r.getMessage() for r in caplog.records if "Ignoring plugins.entries.bubblewrap-yuno.settings.binds" in r.getMessage()]
             assert len(dropped) == 2
             assert any("/keys" in m or str(home / ".ssh") in m for m in dropped)
             assert any("/mnt" in m for m in dropped)
@@ -1627,7 +1638,7 @@ class TestBindsFrozenAtConstruction:
             assert [(b.src, b.dest) for b in env._config.binds] == [(str(home / "data"), "/data")]
             assert (str(home / "data"), "/data") in [m[1:] for m in _mounts(env._wrap_popen_args(["bash"])) if m[0] == "--ro-bind"]
             assert "~" not in env._wrap_popen_args(["bash"])
-            assert any("Ignoring plugins.entries.bubblewrap.settings.binds entry ~ ->" in r.getMessage() for r in caplog.records)
+            assert any("Ignoring plugins.entries.bubblewrap-yuno.settings.binds entry ~ ->" in r.getMessage() for r in caplog.records)
         finally:
             env.cleanup()
 
@@ -1684,7 +1695,7 @@ class TestBindSourceGuard:
 
     @staticmethod
     def _refused(work_dir, config, sandbox_root):
-        with _no_session(), pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.binds") as exc:
+        with _no_session(), pytest.raises(ValueError, match="plugins.entries.bubblewrap-yuno.settings.binds") as exc:
             BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
         assert "dest equal to src" in str(exc.value)
         assert not sandbox_root.exists() or not any(sandbox_root.iterdir())
@@ -1797,6 +1808,13 @@ class TestBindSourceGuard:
             env.cleanup()
 
 
+# The terminal tool's own commands may follow a dead cwd. Later cores make that opt-in per call
+# (execute(allow_cwd_fallback=True), which the terminal tool passes); Hermes 0.23 always follows it.
+TERMINAL_EXECUTE_KWARGS = (
+    {"allow_cwd_fallback": True} if "allow_cwd_fallback" in inspect.signature(LocalEnvironment.execute).parameters
+    else {})
+
+
 @needs_bwrap
 class TestDeletedCwdRecovery:
     def test_deleted_cwd_recovers_to_the_parent_and_rebinds_when_recreated(self, sandbox_root, host_dir):
@@ -1804,22 +1822,21 @@ class TestDeletedCwdRecovery:
         work.mkdir()
         env = BubblewrapEnvironment(cwd=str(work), timeout=30)
         try:
-            assert env.execute("pwd")["output"].strip() == str(work)
+            assert env.execute("pwd", **TERMINAL_EXECUTE_KWARGS)["output"].strip() == str(work)
             shutil.rmtree(work)
-            # LocalEnvironment recovers the tracked cwd on the first spawn after
-            # the deletion, whose wrapper still targets the old dir (same as the
-            # local backend); every spawn after that must run, not wedge on the
-            # missing bind source.
-            env.execute("true")
-            result = env.execute("pwd")
+            # As for the local backend, a terminal command after the deletion
+            # lands in the nearest existing parent; every spawn after that must
+            # run, not wedge on the missing bind source.
+            env.execute("true", **TERMINAL_EXECUTE_KWARGS)
+            result = env.execute("pwd", **TERMINAL_EXECUTE_KWARGS)
             assert result["returncode"] == 0, result["output"]
             recovered = result["output"].strip()
             assert recovered == env.cwd != str(work)
             assert os.path.isdir(recovered)
             # The recovered dir is on the read-only root: visible, not writable.
-            assert env.execute("touch ./r1-probe")["returncode"] != 0
+            assert env.execute("touch ./r1-probe", **TERMINAL_EXECUTE_KWARGS)["returncode"] != 0
             work.mkdir()
-            result = env.execute(f"cd {work} && touch r1-probe")
+            result = env.execute(f"cd {work} && touch r1-probe", **TERMINAL_EXECUTE_KWARGS)
             assert result["returncode"] == 0, result["output"]
             assert (work / "r1-probe").is_file()
         finally:
@@ -1834,25 +1851,26 @@ class TestDeletedCwdRecovery:
         sub.mkdir(parents=True)
         env = BubblewrapEnvironment(cwd=str(work), timeout=30)
         try:
-            assert env.execute(f"cd {sub} && pwd")["output"].strip() == str(sub)
+            assert env.execute(f"cd {sub} && pwd", **TERMINAL_EXECUTE_KWARGS)["output"].strip() == str(sub)
             assert env.cwd == str(sub)
             if how == "host":
                 shutil.rmtree(sub)
             else:
-                assert env.execute('rm -rf "$PWD"')["returncode"] == 0
+                assert env.execute('rm -rf "$PWD"', **TERMINAL_EXECUTE_KWARGS)["returncode"] == 0
             assert env.cwd == str(sub) and not sub.exists()
             with caplog.at_level(logging.WARNING):
-                first = env.execute("pwd")
-            # The wrapper still cd's to the gone directory on this spawn, as
-            # for the local backend; the tracked cwd is recovered from here on.
-            assert first["returncode"] == 126, first["output"]
+                first = env.execute("pwd", **TERMINAL_EXECUTE_KWARGS)
+            # As for the local backend, this spawn already runs in the nearest
+            # usable ancestor and reports the move; the tracked cwd follows.
+            assert first["returncode"] == 0, first["output"]
+            assert first["output"].strip() == str(work)
+            assert first["cwd_fallback"] == {"requested": str(sub), "used": str(work)}
             assert "not visible inside the sandbox" not in first["output"]
             assert "bwrap:" not in first["output"]
             assert env.cwd == str(work)
-            messages = [r.getMessage() for r in caplog.records]
-            assert any("missing on disk" in m and str(sub) in m for m in messages)
-            assert not any("bubblewrap" in m for m in messages)
-            result = env.execute("pwd")
+            # Core's own warning wording is core's; the sandbox adds none of its own.
+            assert not any("bubblewrap" in r.getMessage() for r in caplog.records)
+            result = env.execute("pwd", **TERMINAL_EXECUTE_KWARGS)
             assert result["returncode"] == 0, result["output"]
             assert result["output"].strip() == str(work)
         finally:
