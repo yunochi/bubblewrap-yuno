@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.1
+version: 1.5.1+yuno.2
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
@@ -13,7 +13,9 @@ description: >
   source is a device node is mounted with --dev-bind (a plain --bind lands with
   nodev set, and the kernel refuses to open a device node on a nodev mount with
   EACCES, so /dev/ttyACM0 would be visible but unusable), and auto_devices binds
-  /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time.
+  /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time, and trust_operator
+  (off by default) which makes paths the operator names in binds/home_allow win
+  over the hidden set instead of being silently dropped.
   Select it with `hermes config set terminal.backend bubblewrap-yuno`.
 requires_hermes: ">=0.22.6"
 platforms: [linux]
@@ -27,6 +29,11 @@ config_schema:
     default: network
     label: Profile
     description: "restricted: read-only working directory, no network. workspace: writable working directory, no network. network: writable working directory and the host network."
+  trust_operator:
+    type: bool
+    default: false
+    label: Trust operator paths
+    description: "Off by default. When on, the paths named in binds and home_allow win over the hidden set: a bind inside HERMES_HOME or an allowlist entry such as .ssh is mounted/shown instead of being dropped with a warning, and no overlay hides it. This removes the sandbox's own escape protection — a read-write bind of HERMES_HOME lets a command rewrite this plugin's code and config.yaml, which runs on the host at the next spawn."
   auto_devices:
     type: bool
     default: true
