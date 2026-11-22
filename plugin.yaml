@@ -1,6 +1,6 @@
 name: bubblewrap-yuno
 label: Bubblewrap (yuno)
-version: 1.5.1+yuno.3
+version: 1.5.1+yuno.7
 manifest_version: 2
 kind: backend
 author: NousResearch (fork maintained by yunochi)
@@ -12,8 +12,8 @@ description: >
   Same sandbox as bubblewrap, plus changes for hardware work: a bind whose
   source is a device node is mounted with --dev-bind (a plain --bind lands with
   nodev set, and the kernel refuses to open a device node on a nodev mount with
-  EACCES, so /dev/ttyACM0 would be visible but unusable), and auto_devices binds
-  /dev/ttyACM* and /dev/ttyUSB* that exist at spawn time, and trust_operator
+  EACCES, so /dev/ttyACM0 would be visible but unusable), auto_bind_globs binds
+  whatever patterns the operator sets on every spawn, and trust_operator
   (off by default) which makes paths the operator names in binds/home_allow win
   over the hidden set instead of being silently dropped. The empty file bound
   over the hidden file paths now lives in the per-user runtime dir
@@ -37,11 +37,17 @@ config_schema:
     default: false
     label: Trust operator paths
     description: "Off by default. When on, the paths named in binds and home_allow win over the hidden set: a bind inside HERMES_HOME or an allowlist entry such as .ssh is mounted/shown instead of being dropped with a warning, and no overlay hides it. This removes the sandbox's own escape protection — a read-write bind of HERMES_HOME lets a command rewrite this plugin's code and config.yaml, which runs on the host at the next spawn."
-  auto_devices:
-    type: bool
-    default: true
-    label: Auto-bind serial devices
-    description: "Bind every /dev/ttyACM* and /dev/ttyUSB* present at spawn time read-write into the sandbox with --dev-bind, so a board that was plugged in after startup is usable. Already-listed binds are not duplicated."
+  auto_bind_globs:
+    type: list
+    default: []
+    label: Auto-bind globs
+    description: "Glob patterns resolved on every spawn and bound read-write, for example [\"/dev/ttyACM*\", \"/dev/ttyUSB*\", \"/dev/bus/usb/*/*\"]. The list is the switch: empty (the default) binds nothing. Already-listed binds are not duplicated, and a pattern is re-read per spawn, so a board plugged in later is picked up."
+  auto_bind_globs_type:
+    type: str
+    choices: [device, any]
+    default: any
+    label: Auto-bind path types
+    description: "device: only character/block device nodes (a stale symlink or a file is skipped). any: whatever the pattern matched — devices, files, sockets and directories, the last read-write with the whole tree under it."
   binds:
     type: list
     default: []

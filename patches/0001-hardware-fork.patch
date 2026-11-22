@@ -1,0 +1,823 @@
+diff -ruN a/__init__.py b/__init__.py
+--- a/__init__.py	2026-11-18 16:43:22.263658880 +0900
++++ b/__init__.py	2026-11-18 16:43:22.264987920 +0900
+@@ -1,7 +1,11 @@
+-"""Bubblewrap terminal backend for Hermes Agent (Linux).
++"""Bubblewrap terminal backend for Hermes Agent (Linux) — local fork by yuno.
+ 
+-    hermes plugins install bubblewrap
+-    hermes config set terminal.backend bubblewrap
++    hermes config set terminal.backend bubblewrap-yuno
++
++Fork of the official plugin with two hardware-facing changes: binds whose
++source is a device node mount with --dev-bind (a plain --bind lands with nodev
++set, and the kernel refuses to open a device node on a nodev mount), and the
++auto_bind_globs setting binds whatever its patterns match at spawn time.
+ 
+ Every ``terminal`` and ``execute_code`` command runs in its own bwrap sandbox on
+ this machine, at the same paths: read-only root, writable working directory,
+@@ -22,9 +26,9 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-BACKEND_NAME = "bubblewrap"
+-PROMPT_SECTION_ID = "bubblewrap-sandbox"
+-SETTING_KEYS = ("profile", "binds", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
++BACKEND_NAME = "bubblewrap-yuno"
++PROMPT_SECTION_ID = "bubblewrap-yuno-sandbox"
++SETTING_KEYS = ("profile", "binds", "auto_bind_globs", "auto_bind_globs_type", "trust_operator", "memory_mb", "cpu_seconds", "max_procs", "home_allow", "hide", "home_default_deny")
+ 
+ _PROFILE_CHOICES = (
+     ("restricted", "restricted - read-only working directory, no network"),
+@@ -49,10 +53,10 @@
+ 
+ 
+ class BubblewrapProvider(TerminalEnvironmentProvider):
+-    """``terminal.backend: bubblewrap``: host paths, every command boxed by bwrap."""
++    """``terminal.backend: bubblewrap-yuno``: host paths, every command boxed by bwrap."""
+ 
+     name = BACKEND_NAME
+-    display_name = "Bubblewrap"
++    display_name = "Bubblewrap (yuno)"
+     # Commands run on this host at the host's own paths, so Hermes keeps its host hints, host
+     # path resolution for the file tools, and the dangerous-command approval prompts: the cwd and
+     # any read-write bind are real host directories, so the sandbox is not disposable.
+@@ -136,7 +140,7 @@
+             "SSH keys, cloud credentials and the Hermes home hidden, memory, CPU and process limits per command.",
+             "The working directory is the writable set: point terminal.cwd at a project or scratch",
+             "directory rather than your home directory.",
+-            "Profile: hermes config set plugins.entries.bubblewrap.settings.profile network|workspace|restricted",
++            "Profile: hermes config set plugins.entries.bubblewrap-yuno.settings.profile network|workspace|restricted",
+         ]
+ 
+     def post_setup(self) -> None:
+@@ -189,6 +193,7 @@
+             writable = ", ".join(extra) + " (the working directory is read-only under this profile)"
+         else:
+             writable = "nothing (the working directory is read-only under this profile)"
++        trusted_note = sandbox.operator_trusted_note(config) if config is not None else ""
+         network = "the host network" if profile.share_net else "no network (loopback only)"
+         dot_only = config is None or config.home_default_deny == sandbox.bubblewrap_home.DENY_DOT
+         entries = "dot entries" if dot_only else "entries"
+@@ -197,7 +202,7 @@
+             "are hidden and read-only for them, and they share the commands' scratch directory ($TMPDIR)."
+         )
+         return (
+-            f"Terminal sandbox: bubblewrap, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
++            f"Terminal sandbox: bubblewrap-yuno, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
+             f"in its own bwrap sandbox on this host with the same paths: the filesystem is read-only except {writable}; "
+             f"{entries} of the home directory that are not on the allowlist do not exist, the Hermes home is hidden, "
+             "and credential paths below a visible entry appear empty; the Hermes scratch directory ($TMPDIR) is this "
+@@ -205,7 +210,7 @@
+             f"each command; it has {network}. A `Read-only file system` error, a missing or empty credential path or a "
+             "refused connection is that boundary, not a broken host: report it instead of working around it. "
+             "Background processes are not available on this backend: each command's sandbox ends with it. "
+-            f"{file_tools}"
++            f"{file_tools}{trusted_note}"
+         )
+ 
+ 
+diff -ruN a/binds.py b/binds.py
+--- a/binds.py	2026-11-18 16:43:22.263581319 +0900
++++ b/binds.py	2026-11-18 16:43:22.264865718 +0900
+@@ -76,6 +76,11 @@
+     home_root: str | None = None
+     home_allow: tuple[str, ...] = ()
+     home_default_deny: str = bubblewrap_home.DENY_DOT
++    # trust_operator: what the operator names is shown, so the hidden-path
++    # refusals below stand down, and a bind inside a trusted read-write bind
++    # (the scratch dir under a bound HERMES_HOME) is not refused as swappable.
++    trust_operator: bool = False
++    trusted: tuple[str, ...] = ()
+ 
+     def home_hidden_unit(self, path: str) -> str | None:
+         """The entry of HOME, off the allowlist and so hidden, that *path* lies in, else None."""
+@@ -125,6 +130,7 @@
+     public: Sequence[str],
+     dest: str | None,
+     hidden_rules: bool,
++    allow_trusted_root: bool,
+ ) -> str | None:
+     """Why *real* must not be bound, else None. The order puts the most specific reason first."""
+     problem = _kind_problem(real, kind)
+@@ -133,10 +139,16 @@
+     root = guard.writable_root(real)
+     # A source bound at its own path directly under a writable root is a
+     # mount point inside, and its parent is the root, also a mount point:
+-    # no command can rename either, so the source cannot be swapped.
++    # no command can rename either, so the source cannot be swapped. Only the
++    # backend's own paths (the scratch dir, the profile home) pass
++    # *allow_trusted_root*: swapping one inside a tree the operator already
++    # granted would add nothing they cannot do there, but an operator bind gets
++    # no such exemption — a symlink would buy the next spawn any host path.
+     if root is not None and not (dest == real and os.path.dirname(real) == root):
+-        return f"{real} lies in {root}, which a sandbox can write to, so a command could swap it"
+-    if not hidden_rules:
++        if not (allow_trusted_root and guard.trust_operator
++                and any(_is_within(root, trusted) for trusted in guard.trusted)):
++            return f"{real} lies in {root}, which a sandbox can write to, so a command could swap it"
++    if not hidden_rules or guard.trust_operator:
+         return None
+     for secret in guard.secret:
+         if _is_within(real, secret):
+@@ -168,6 +180,7 @@
+     public: Sequence[str] = (),
+     dest: str | None = None,
+     hidden_rules: bool = True,
++    allow_trusted_root: bool = False,
+ ) -> tuple[str, str | None]:
+     """Resolve *path* once: ``(real path, None)`` when it may be bound, ``(real path, reason)`` otherwise.
+ 
+@@ -183,7 +196,10 @@
+     real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+     if not os.path.exists(real):
+         return real, f"{real} does not exist"
+-    return real, _refusal(real, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
++    return real, _refusal(
++        real, guard, kind=kind, public=public, dest=dest,
++        hidden_rules=hidden_rules, allow_trusted_root=allow_trusted_root,
++    )
+ 
+ 
+ def validated_bind_source(
+@@ -195,6 +211,7 @@
+     public: Sequence[str] = (),
+     dest: str | None = None,
+     hidden_rules: bool = True,
++    allow_trusted_root: bool = False,
+ ) -> str | None:
+     """The real path to bind for *path* (see :func:`bind_refusal`), or None with one warning.
+ 
+@@ -203,7 +220,10 @@
+     leaves the sandbox running. *label* names the setting or variable in
+     the warning.
+     """
+-    real, reason = bind_refusal(path, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
++    real, reason = bind_refusal(
++        path, guard, kind=kind, public=public, dest=dest,
++        hidden_rules=hidden_rules, allow_trusted_root=allow_trusted_root,
++    )
+     if reason is None:
+         return real
+     logger.warning("bubblewrap: not binding %s (%s): %s", label, path, reason)
+diff -ruN a/home.py b/home.py
+--- a/home.py	2026-11-18 16:43:22.263620659 +0900
++++ b/home.py	2026-11-18 16:43:22.264903549 +0900
+@@ -199,8 +199,8 @@
+     ".local/share/mime",
+ )
+ 
+-ALLOW_KEY = "plugins.entries.bubblewrap.settings.home_allow"
+-DENY_KEY = "plugins.entries.bubblewrap.settings.home_default_deny"
++ALLOW_KEY = "plugins.entries.bubblewrap-yuno.settings.home_allow"
++DENY_KEY = "plugins.entries.bubblewrap-yuno.settings.home_default_deny"
+ DENY_DOT = "dot"
+ DENY_ALL = "all"
+ 
+diff -ruN a/plugin.yaml b/plugin.yaml
+--- a/plugin.yaml	2026-11-18 16:43:22.263690170 +0900
++++ b/plugin.yaml	2026-11-18 16:43:22.265041971 +0900
+@@ -1,19 +1,25 @@
+-name: bubblewrap
+-label: Bubblewrap
+-version: 1.5.1
++name: bubblewrap-yuno
++label: Bubblewrap (yuno)
++version: 1.5.1+yuno.7
+ manifest_version: 2
+ kind: backend
+-author: NousResearch
++author: NousResearch (fork maintained by yunochi)
+ license: MIT
+ homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/bubblewrap
+ description: >
+-  Bubblewrap terminal backend for Linux: every terminal and execute_code
+-  command runs in its own bwrap sandbox on this machine, at the same paths.
+-  Read-only root, writable working directory (per profile), the dot entries
+-  of the home directory (credential stores always) and the Hermes home hidden,
+-  a scratch directory per sandbox, private /tmp and /proc,
+-  agent and docker sockets masked, and memory, CPU and process limits.
+-  Select it with `hermes config set terminal.backend bubblewrap`.
++  Local fork of the official bubblewrap backend, kept at
++  https://github.com/NousResearch/hermes-official-plugins/tree/main/bubblewrap.
++  Same sandbox as bubblewrap, plus changes for hardware work: a bind whose
++  source is a device node is mounted with --dev-bind (a plain --bind lands with
++  nodev set, and the kernel refuses to open a device node on a nodev mount with
++  EACCES, so /dev/ttyACM0 would be visible but unusable), auto_bind_globs binds
++  whatever patterns the operator sets on every spawn, and trust_operator
++  (off by default) which makes paths the operator names in binds/home_allow win
++  over the hidden set instead of being silently dropped. The empty file bound
++  over the hidden file paths now lives in the per-user runtime dir
++  (/run/user/<uid>/hermes-bwrap-empty), outside every bind a sandbox gets, so a
++  writable HOME cannot be used to swap it for a link to a secret.
++  Select it with `hermes config set terminal.backend bubblewrap-yuno`.
+ requires_hermes: ">=0.22.6"
+ platforms: [linux]
+ tags: [terminal, sandbox, bubblewrap, linux]
+@@ -26,6 +32,22 @@
+     default: network
+     label: Profile
+     description: "restricted: read-only working directory, no network. workspace: writable working directory, no network. network: writable working directory and the host network."
++  trust_operator:
++    type: bool
++    default: false
++    label: Trust operator paths
++    description: "Off by default. When on, the paths named in binds and home_allow win over the hidden set: a bind inside HERMES_HOME or an allowlist entry such as .ssh is mounted/shown instead of being dropped with a warning, and no overlay hides it. This removes the sandbox's own escape protection — a read-write bind of HERMES_HOME lets a command rewrite this plugin's code and config.yaml, which runs on the host at the next spawn."
++  auto_bind_globs:
++    type: list
++    default: []
++    label: Auto-bind globs
++    description: "Glob patterns resolved on every spawn and bound read-write, for example [\"/dev/ttyACM*\", \"/dev/ttyUSB*\", \"/dev/bus/usb/*/*\"]. The list is the switch: empty (the default) binds nothing. Already-listed binds are not duplicated, and a pattern is re-read per spawn, so a board plugged in later is picked up."
++  auto_bind_globs_type:
++    type: str
++    choices: [device, any]
++    default: any
++    label: Auto-bind path types
++    description: "device: only character/block device nodes (a stale symlink or a file is skipped). any: whatever the pattern matched — devices, files, sockets and directories, the last read-write with the whole tree under it."
+   binds:
+     type: list
+     default: []
+diff -ruN a/sandbox.py b/sandbox.py
+--- a/sandbox.py	2026-11-18 16:43:22.263477827 +0900
++++ b/sandbox.py	2026-11-18 16:43:22.264766957 +0900
+@@ -2,7 +2,7 @@
+ 
+ Every terminal command under ``terminal.backend: bubblewrap`` runs inside a
+ bwrap sandbox. This module builds the bwrap argv prefix from the plugin's
+-settings (``plugins.entries.bubblewrap.settings.*``) and construction-time
++settings (``plugins.entries.bubblewrap-yuno.settings.*``) and construction-time
+ inputs only. Nothing produced inside a sandbox (the
+ tracked cwd, the shell snapshot, command output) feeds a mount or a flag
+ argument; the tracked cwd is used for ``--chdir`` alone.
+@@ -95,6 +95,7 @@
+ from __future__ import annotations
+ 
+ import contextlib
++import glob
+ import hashlib
+ import json
+ import logging
+@@ -104,6 +105,7 @@
+ import shlex
+ import shutil
+ import signal
++import stat
+ import sys
+ import subprocess
+ import threading
+@@ -163,16 +165,22 @@
+ DEFAULT_CPU_SECONDS = 30
+ DEFAULT_MAX_PROCS = 256
+ 
+-# The plugin's settings keys (plugins.entries.bubblewrap.settings.<key>).
++# The plugin's settings keys (plugins.entries.bubblewrap-yuno.settings.<key>).
+ SETTING_PROFILE = "profile"
+ SETTING_BINDS = "binds"
++SETTING_AUTO_BIND_GLOBS = "auto_bind_globs"
++SETTING_AUTO_BIND_GLOBS_TYPE = "auto_bind_globs_type"
++SETTING_TRUST_OPERATOR = "trust_operator"
+ SETTING_MEMORY_MB = "memory_mb"
+ SETTING_CPU_SECONDS = "cpu_seconds"
+ SETTING_MAX_PROCS = "max_procs"
+ SETTING_HOME_ALLOW = "home_allow"
+ SETTING_HIDE = "hide"
+ SETTING_HOME_DEFAULT_DENY = "home_default_deny"
+-SETTINGS_PREFIX = "plugins.entries.bubblewrap.settings"
++SETTINGS_PREFIX = "plugins.entries.bubblewrap-yuno.settings"
++# What auto_bind_globs may match: device nodes only, or any non-directory path.
++AUTO_BIND_TYPES: tuple[str, ...] = ("device", "any")
++DEFAULT_AUTO_BIND_TYPE = "any"
+ # terminal.home_mode is a core setting; core bridges it to this env name and
+ # hermes_constants.get_subprocess_home reads it. The spellings that
+ # get_subprocess_home treats as "profile".
+@@ -210,11 +218,17 @@
+ 
+ @dataclass(frozen=True)
+ class BindMount:
+-    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox."""
++    """One operator-supplied bind: host *src* mounted at *dest* in the sandbox.
++
++    *auto* marks a bind that auto_bind_globs produced rather than one
++    the operator wrote: it is a convenience, so a source the backend would
++    refuse is skipped with a warning instead of failing the whole spawn.
++    """
+ 
+     src: str
+     dest: str
+     readonly: bool = True
++    auto: bool = False
+ 
+ 
+ @dataclass(frozen=True)
+@@ -235,6 +249,12 @@
+     home_allow: tuple[str, ...] = ()
+     hide: tuple[str, ...] = ()
+     home_default_deny: str = bubblewrap_home.DENY_DOT
++    # Operator-trusted mode: what binds and home_allow name is shown, not hidden.
++    trust_operator: bool = False
++    # auto_bind_globs: patterns bound at each spawn (empty means none), and
++    # what they may match: "device" nodes only, or "any" non-directory path.
++    auto_bind_globs: tuple[str, ...] = ()
++    auto_bind_globs_type: str = DEFAULT_AUTO_BIND_TYPE
+ 
+ 
+ def _setting_name(key: str) -> str:
+@@ -313,6 +333,68 @@
+     return value
+ 
+ 
++def _parse_bool(key: str, raw: object, default: bool) -> bool:
++    """A bool setting; the spellings config files and the CLI produce are accepted."""
++    if raw is None or raw == "":
++        return default
++    if isinstance(raw, bool):
++        return raw
++    value = str(raw).strip().lower()
++    if value in ("1", "true", "yes", "on"):
++        return True
++    if value in ("0", "false", "no", "off"):
++        return False
++    raise ValueError(f"{_setting_name(key)} must be true or false, got {raw!r}")
++
++
++def auto_glob_binds(binds: Iterable[BindMount], patterns: Sequence[str],
++                    kind: str = "device") -> tuple[BindMount, ...]:
++    """BindMounts for the host paths the globs match now, minus the ones already bound.
++
++    Read at every config load, which the backend does per spawn: a board plugged
++    in after startup is picked up by the next command, and one unplugged simply
++    stops being bound. *patterns* is the operator's auto_bind_globs setting.
++    kind="device" takes only character and block nodes, which keeps a stale
++    symlink or a file out of the mount list; kind="any" takes whatever matched,
++    directories included, because an operator who names a pattern means it.
++    A glob that matches nothing adds nothing. A match whose real path is
++    already bound (explicitly or by an earlier pattern) is skipped: a by-id
++    symlink resolves to the node, which is what the tool opens anyway, and the
++    alias path itself has no parent inside the sandbox's fresh /dev.
++    """
++    covered = {os.path.realpath(bind.src) for bind in binds}
++    covered |= {os.path.realpath(bind.dest) for bind in binds}
++    found: list[BindMount] = []
++    for pattern in patterns:
++        for matched in sorted(glob.glob(pattern)):
++            try:
++                mode = os.stat(matched).st_mode
++            except OSError:
++                continue
++            if kind == "device" and not (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
++                continue
++            if stat.S_ISDIR(mode):
++                # A directory pulls its whole tree in read-write; say so once per
++                # spawn instead of refusing it, since the operator named the glob.
++                logger.warning(
++                    "%s pattern %s auto-binds the directory %s read-write", 
++                    _setting_name(SETTING_AUTO_BIND_GLOBS), pattern, matched,
++                )
++            real = os.path.realpath(matched)
++            if real in covered:
++                # e.g. /dev/serial/by-id/usb-... resolving to /dev/ttyACM0 that
++                # an earlier pattern already bound: the node is what the tool
++                # ends up opening, and the alias path does not exist inside the
++                # sandbox's fresh /dev (its parent would have to be created).
++                logger.debug(
++                    "auto_bind_globs: %s resolves to %s, already bound", matched, real,
++                )
++                continue
++            covered.add(real)
++            found.append(BindMount(src=real, dest=matched, readonly=False, auto=True))
++    return tuple(found)
++
++
+ def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mode: str = "") -> BubblewrapConfig:
+     """Build the config from the plugin's settings mapping and terminal.home_mode.
+ 
+@@ -323,9 +405,20 @@
+     """
+     settings = settings or {}
+     profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
++    binds = _parse_binds(settings.get(SETTING_BINDS))
++    # The list is the switch: unset or empty binds nothing, so there is no
++    # built-in pattern to surprise an operator who never asked for one.
++    auto_globs = _parse_string_list(SETTING_AUTO_BIND_GLOBS, settings.get(SETTING_AUTO_BIND_GLOBS))
++    auto_kind = _parse_choice(
++        SETTING_AUTO_BIND_GLOBS_TYPE, settings.get(SETTING_AUTO_BIND_GLOBS_TYPE),
++        AUTO_BIND_TYPES, DEFAULT_AUTO_BIND_TYPE,
++    )
++    if auto_globs:
++        binds += auto_glob_binds(binds, auto_globs, auto_kind)
++    trust_operator = _parse_bool(SETTING_TRUST_OPERATOR, settings.get(SETTING_TRUST_OPERATOR), False)
+     return BubblewrapConfig(
+         profile=profile,
+-        binds=_parse_binds(settings.get(SETTING_BINDS)),
++        binds=binds,
+         memory_mb=_parse_limit(SETTING_MEMORY_MB, settings.get(SETTING_MEMORY_MB), DEFAULT_MEMORY_MB),
+         cpu_seconds=_parse_limit(SETTING_CPU_SECONDS, settings.get(SETTING_CPU_SECONDS), DEFAULT_CPU_SECONDS),
+         max_procs=_parse_limit(SETTING_MAX_PROCS, settings.get(SETTING_MAX_PROCS), DEFAULT_MAX_PROCS),
+@@ -336,6 +429,9 @@
+             SETTING_HOME_DEFAULT_DENY, settings.get(SETTING_HOME_DEFAULT_DENY),
+             (bubblewrap_home.DENY_DOT, bubblewrap_home.DENY_ALL), bubblewrap_home.DENY_DOT,
+         ),
++        trust_operator=trust_operator,
++        auto_bind_globs=tuple(auto_globs),
++        auto_bind_globs_type=auto_kind,
+     )
+ 
+ 
+@@ -368,6 +464,73 @@
+     return tuple(resolved)
+ 
+ 
++def operator_trusted_paths(home: str, config: "BubblewrapConfig") -> tuple[str, ...]:
++    """Real host paths the operator named in ``binds`` or ``home_allow``.
++
++    Only consulted under ``trust_operator``. The paths an operator names are
++    taken as trusted, so the hidden set stands down for them: a bind of
++    HERMES_HOME or a ``home_allow`` entry such as ``.ssh`` shows the path
++    instead of being dropped, and no overlay is mounted over it.
++    """
++    home = os.path.abspath(os.path.expanduser(home))
++    found: list[str] = []
++    for bind in config.binds:
++        found.append(_real_host_path(bind.src))
++    for item in config.home_allow:
++        text = item.strip()
++        if not text:
++            continue
++        if text == "~" or text.startswith("~/"):
++            text = os.path.join(home, text[2:])
++        found.append(_real_host_path(text if os.path.isabs(text) else os.path.join(home, text)))
++    return tuple(dict.fromkeys(found))
++
++
++def relax_hidden_paths(hidden_paths: Sequence[str], trusted: Sequence[str]) -> tuple[str, ...]:
++    """Drop every hidden path an operator-trusted path covers (itself or a parent of it)."""
++    if not trusted:
++        return tuple(hidden_paths)
++    return tuple(p for p in hidden_paths if not any(_is_within(p, root) for root in trusted))
++
++
++def hidden_paths_for(config: "BubblewrapConfig", home: str, hermes_home: str,
++                     extra: Sequence[str] = (), cached: Sequence[str] | None = None) -> tuple[str, ...]:
++    """The hidden set for this config: sensitive_paths, minus what trust_operator names."""
++    hidden = tuple(cached) if cached is not None else sensitive_paths(home, hermes_home, extra)
++    if not config.trust_operator:
++        return hidden
++    relaxed = relax_hidden_paths(hidden, operator_trusted_paths(home, config))
++    if len(relaxed) != len(hidden):
++        logger.warning(
++            "%s is on: %d path(s) the operator named in binds/home_allow are not hidden",
++            _setting_name(SETTING_TRUST_OPERATOR), len(hidden) - len(relaxed),
++        )
++    return relaxed
++
++
++def operator_trusted_note(config: "BubblewrapConfig") -> str:
++    """One sentence naming the operator-trusted paths, or '' when trust_operator is off."""
++    if not config.trust_operator:
++        return ""
++    home = os.path.realpath(get_real_home() or os.path.expanduser("~"))
++    # Device nodes are bound for the work, not named by the operator in this
++    # sense; listing every /dev/ttyACM* would only add noise.
++    trusted = tuple(p for p in operator_trusted_paths(home, config) if not _is_within(p, "/dev/"))
++    if not trusted:
++        return ""
++    return (
++        f" The operator trusts {', '.join(trusted)}: those paths are not sandbox boundaries, "
++        "so reading or writing them there is expected."
++    )
++
++
++def denied_home_names_for(config: "BubblewrapConfig", home: str) -> tuple[str, ...]:
++    """The home entries the allowlist refuses: none under trust_operator."""
++    if config.trust_operator:
++        return ()
++    return bubblewrap_home.denied_home_names(home)
++
++
+ def sensitive_paths(home: str, hermes_home: str, extra: Sequence[str] = ()) -> tuple[str, ...]:
+     """Real host paths that must stay hidden: the HOME set, HERMES_HOME and HOME/.hermes.
+ 
+@@ -408,19 +571,69 @@
+     )
+ 
+ 
+-def empty_file_path(state_dir: str) -> str:
+-    """Host path of the zero-length file bound over sensitive files.
++EMPTY_FILE_DIR_NAME = "hermes-bwrap-empty"
+ 
+-    It sits beside the state dir, not inside it: the state dir is bound
+-    read-write into every spawn, so a file kept there could be rewritten
+-    from inside the sandbox and would then show at the hidden paths. That
+-    holds only while the parent of the state dir lies outside every
+-    writable bind, since bwrap follows a symlink put in the file's place
+-    when it resolves the bind source; BubblewrapEnvironment therefore
+-    refuses a sandbox dir inside the cwd or a read-write operator bind
+-    unless a hidden path covers it (_check_sandbox_root).
++
++def empty_file_dir() -> str | None:
++    """Host dir holding the zero-length file bound over hidden files.
++
++    It must lie outside every path a sandbox can write: the empty file is a
++    mount source, and bwrap follows a symlink found in its place, so a
++    directory a command can write to would let it point the source at a
++    secret and show it at the hidden path on the next spawn. The per-user
++    runtime dir is not bound into any sandbox and is not shared with other
++    users, so it serves; without one the caller falls back to the state dir
++    (see empty_file_path).
+     """
+-    return state_dir.rstrip(os.sep) + ".empty"
++    for base in (os.environ.get("XDG_RUNTIME_DIR", ""), f"/run/user/{os.getuid()}"):
++        if not base or not os.path.isdir(base):
++            continue
++        path = os.path.join(base, EMPTY_FILE_DIR_NAME)
++        try:
++            os.makedirs(path, mode=0o700, exist_ok=True)
++        except OSError:
++            continue
++        return path
++    return None
++
++
++def empty_file_path(state_dir: str) -> str:
++    """Host path of the zero-length file bound over sensitive files, created empty.
++
++    A file at the per-user runtime dir, outside every bind a sandbox gets
++    and outside the state dir, so nothing inside a sandbox can reach it to
++    replace it with a symlink to a secret. Without a runtime dir it falls
++    back to the state dir's sibling (the old layout), which is only safe
++    while that directory stays outside every writable bind — warn and let
++    _check_sandbox_root cover the rest.
++    """
++    directory = empty_file_dir()
++    if directory is None:
++        logger.warning(
++            "bubblewrap: no per-user runtime dir (XDG_RUNTIME_DIR or /run/user/%d), so the empty file bound "
++            "over hidden files sits beside the state dir; a command that can write that directory could "
++            "replace it with a link to a secret.", os.getuid(),
++        )
++        path = state_dir.rstrip(os.sep) + ".empty"
++    else:
++        path = os.path.join(directory, os.path.basename(state_dir.rstrip(os.sep)) + ".empty")
++    try:
++        st = os.lstat(path)
++    except FileNotFoundError:
++        st = None
++    if st is not None and not stat.S_ISREG(st.st_mode):
++        # A symlink or a directory in its place: bwrap would follow the
++        # source, so it goes before the file is made again.
++        os.unlink(path)
++        st = None
++    if st is None:
++        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
++        os.chmod(path, 0o400)
++    elif st.st_size:
++        os.chmod(path, 0o600)
++        os.truncate(path, 0)
++        os.chmod(path, 0o400)
++    return path
+ 
+ 
+ def sensitive_overlay_args(hidden_paths: Sequence[str], state_dir: str) -> list[str]:
+@@ -449,6 +662,24 @@
+     return argv
+ 
+ 
++def bind_mount_flag(bind: "BindMount") -> str:
++    """The bwrap flag one operator bind goes in with.
++
++    A device node needs ``--dev-bind``. ``--bind`` leaves nodev set on the
++    mount, and the kernel refuses to open a device node on a nodev mount with
++    EACCES: /dev/ttyACM0 would show up at its path, list as crw-rw-rw-, and
++    fail on open. ``--dev-bind`` keeps device access, and has no read-only
++    form, so a read-only device is remounted read-only right after it mounts.
++    """
++    try:
++        mode = os.stat(bind.src).st_mode
++    except OSError:
++        mode = 0
++    if stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
++        return "--dev-bind"
++    return "--ro-bind" if bind.readonly else "--bind"
++
++
+ # Marks an argument the caller left out, where None already has a meaning.
+ _UNRESOLVED: object = object()
+ 
+@@ -574,6 +805,8 @@
+     home_root: str | None,
+     home_allow: Sequence[str],
+     home_default_deny: str = bubblewrap_home.DENY_DOT,
++    trust_operator: bool = False,
++    trusted_paths: Sequence[str] = (),
+ ) -> bubblewrap_binds.BindGuard:
+     """The BindGuard for an environment: the hidden set split into credential stores and Hermes homes."""
+     homes = tuple(homes)
+@@ -585,6 +818,8 @@
+         home_root=home_root,
+         home_allow=tuple(home_allow),
+         home_default_deny=home_default_deny,
++        trust_operator=trust_operator,
++        trusted=tuple(trusted_paths),
+     )
+ 
+ 
+@@ -675,17 +910,17 @@
+     for bind in binds:
+         if is_sensitive_source(bind.src, hidden_paths):
+             logger.warning(
+-                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s: source is under a sensitive path",
++                "Ignoring %s entry %s: source is under a sensitive path", _setting_name(SETTING_BINDS),
+                 bind.src,
+             )
+             continue
+         hidden = hidden_path_under(bind.src, hidden_paths)
+         if hidden is not None and not _same_host_path(bind.src, bind.dest):
+             logger.warning(
+-                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s -> %s: the source contains the "
++                "Ignoring %s entry %s -> %s: the source contains the "
+                 "hidden path %s, which would be readable at the destination. Bind it at its "
+                 "own path (dest equal to src) instead.",
+-                bind.src, bind.dest, hidden,
++                _setting_name(SETTING_BINDS), bind.src, bind.dest, hidden,
+             )
+             continue
+         kept.append(bind)
+@@ -888,8 +1123,7 @@
+     spawn.
+     """
+     profile = resolve_profile(config.profile)
+-    if hidden_paths is None:
+-        hidden_paths = sensitive_paths(home, hermes_home)
++    hidden_paths = hidden_paths_for(config, home, hermes_home, cached=hidden_paths)
+     # Resolved first: get_scratch_dir makes the directory, and with it HOME
+     # when HERMES_HOME lies under a HOME that does not exist yet.
+     if scratch_dir is None:
+@@ -899,7 +1133,7 @@
+     if home_allow is None and home_root is not None:
+         home_allow = bubblewrap_home.resolve_allowlist(
+             home_root, "", (),
+-            denied_names=bubblewrap_home.denied_home_names(home_root), denied_paths=tuple(hidden_paths),
++            denied_names=denied_home_names_for(config, home_root), denied_paths=tuple(hidden_paths),
+         )
+     if profile_home is _UNRESOLVED:
+         profile_home = None
+@@ -914,6 +1148,8 @@
+         guard = bind_guard(
+             hidden_paths, hermes_homes(home, hermes_home), writable,
+             home_root, home_allow or (), config.home_default_deny,  # type: ignore[arg-type]
++            trust_operator=config.trust_operator,
++            trusted_paths=operator_trusted_paths(home, config) if config.trust_operator else (),
+         )
+         ca_bundles = ca_bundle_binds(guard)
+ 
+@@ -950,7 +1186,15 @@
+     mounts: list[tuple[str, str, str]] = [
+         ("--bind-try" if profile.writable_cwd else "--ro-bind-try", initial_cwd, initial_cwd),
+     ]
+-    mounts += [("--ro-bind" if bind.readonly else "--bind", bind.src, bind.dest) for bind in binds]
++    mounts += [(bind_mount_flag(bind), bind.src, bind.dest) for bind in binds]
++    # --dev-bind has no read-only form: a read-only device bind is mounted by
++    # it and then remounted read-only, after every operator bind has landed.
++    remount_ro: list[str] = [
++        token
++        for bind in binds
++        if bind.readonly and bind_mount_flag(bind) == "--dev-bind"
++        for token in ("--remount-ro", bind.dest)
++    ]
+     writable = [(initial_cwd, initial_cwd)] if profile.writable_cwd else []
+     writable += [(bind.src, bind.dest) for bind in binds if not bind.readonly]
+     mount_points = [initial_cwd, *(bind.dest for bind in binds)]
+@@ -972,6 +1216,7 @@
+     if home_root is None:
+         for mount in mounts:
+             argv += mount
++        argv += remount_ro
+         # Pin the parents of the hidden paths that sit inside a writable bind
+         # (see ancestor_pin_args) after those binds, so the pins land on top
+         # of them, and before the overlays, so the overlays land on the pins.
+@@ -1019,6 +1264,7 @@
+         for mount in mounts:
+             if not in_home(mount[2]):
+                 argv += mount
++        argv += remount_ro
+         argv += bubblewrap_home.home_layout_args(
+             root,
+             units,
+@@ -1439,7 +1685,9 @@
+         # Resolved once and kept for the life of the environment: the set
+         # never follows a symlink swapped in later.
+         self._operator_hidden = operator_hidden_paths(self._home, self._config.hide)
+-        self._hidden_paths = sensitive_paths(self._home, self._hermes_home, self._operator_hidden)
++        self._hidden_paths = hidden_paths_for(
++            self._config, self._home, self._hermes_home, self._operator_hidden,
++        )
+         # HOME is default-deny (home_default_deny). What a sandbox may see is
+         # fixed here too: a command cannot widen it by changing PATH.
+         self._home_root = bubblewrap_home.resolve_home_root(self._home)
+@@ -1453,7 +1701,7 @@
+         if self._home_root is not None:
+             self._home_allow = bubblewrap_home.resolve_allowlist(
+                 self._home_root, os.environ.get("PATH", ""), self._config.home_allow,
+-                denied_names=bubblewrap_home.denied_home_names(self._home_root),
++                denied_names=denied_home_names_for(self._config, self._home_root),
+                 denied_paths=self._hidden_paths,
+                 default_deny=self._config.home_default_deny,
+             )
+@@ -1502,7 +1750,6 @@
+         # Read-only and outside the state dir: nothing in a sandbox can
+         # write to what shows at the hidden file paths.
+         self._empty_file = empty_file_path(self._state_dir)
+-        os.close(os.open(self._empty_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400))
+         try:
+             self._make_private_scratch()
+         except BaseException:
+@@ -1564,7 +1811,8 @@
+             home_root = None
+         guard = bind_guard(
+             self._hidden_paths, hermes_homes(self._home, self._hermes_home), writable, home_root, self._home_allow,
+-            self._config.home_default_deny,
++            self._config.home_default_deny, trust_operator=self._config.trust_operator,
++            trusted_paths=operator_trusted_paths(self._home, self._config) if self._config.trust_operator else (),
+         )
+         kept: list[BindMount] = []
+         for bind in self._config.binds:
+@@ -1589,6 +1837,10 @@
+             self._scratch_dir = bubblewrap_binds.validated_bind_source(
+                 "the Hermes scratch dir", self._scratch_dir, guard, kind=bubblewrap_binds.DIRECTORY,
+                 public=(os.path.join(self._hermes_home, "cache", "scratch"),),
++                # The backend's own path: inside a tree the operator already
++                # granted read-write it buys nothing new, and dropping it would
++                # take $TMPDIR away from every command.
++                allow_trusted_root=True,
+             )
+ 
+     def _validated_profile_home(self, guard: bubblewrap_binds.BindGuard) -> tuple[str, str] | None:
+@@ -1611,6 +1863,7 @@
+         real, reason = bubblewrap_binds.bind_refusal(
+             link, guard, kind=bubblewrap_binds.DIRECTORY, dest=link,
+             public=() if os.path.islink(link) else (link,),
++            allow_trusted_root=True,
+         )
+         if reason is not None:
+             raise ValueError(
+@@ -1855,6 +2108,7 @@
+         nothing the root bind does not.
+         """
+         writable = self._writable
++        skipped: list[BindMount] = []
+         for bind in self._config.binds:
+             if bind.readonly:
+                 continue
+@@ -1874,8 +2128,15 @@
+                     f"its source lies inside {writable[inside[0]]} {inside[0]}, which is "
+                     "writable inside the sandbox"
+                 )
++            if bind.auto:
++                logger.warning(
++                    "bubblewrap: not auto-binding %s (%s matched it): %s",
++                    bind.src, _setting_name(SETTING_AUTO_BIND_GLOBS), problem,
++                )
++                skipped.append(bind)
++                continue
+             raise ValueError(
+-                f"plugins.entries.bubblewrap.settings.binds entry {bind.src} -> {bind.dest} is read-write "
++                f"plugins.entries.bubblewrap-yuno.settings.binds entry {bind.src} -> {bind.dest} is read-write "
+                 f"and {problem} with the bubblewrap backend: a command could swap the "
+                 "source and choose the next spawn's mount. Bind it read-write only at "
+                 "its own path (dest equal to src) directly under terminal.cwd, a "
+@@ -1883,6 +2144,11 @@
+                 "way: bound at its own path the source is a mount point, which no "
+                 "command can rename or move from any path; or make it read-only."
+             )
++        if skipped:
++            self._config = replace(
++                self._config,
++                binds=tuple(bind for bind in self._config.binds if bind not in skipped),
++            )
+ 
+     def _check_absent_denied_paths(self) -> None:
+         """Refuse a writable bind under which a command could create a credential path.
+@@ -1946,6 +2212,14 @@
+         that maps elsewhere, and a source containing one at its own path
+         sits below the overlay.
+         """
++        if self._config.trust_operator:
++            logger.warning(
++                "bubblewrap: %s is on, so the sandbox dir %s is not refused for being writable from "
++                "inside. A command that can write it can also rewrite the empty files bound over the "
++                "hidden paths that are still hidden.",
++                _setting_name(SETTING_TRUST_OPERATOR), sandbox_root,
++            )
++            return
+         profile_home = os.path.realpath(os.path.join(self._hermes_home, "home"))
+         if self._config.home_mode in PROFILE_HOME_MODES and _is_within(sandbox_root, profile_home):
+             raise ValueError(
+@@ -1965,7 +2239,7 @@
+                     "writable inside the sandbox with the bubblewrap backend: a command "
+                     "could replace the empty file bound over hidden files. Set "
+                     "terminal.sandbox_dir to a directory outside terminal.cwd and "
+-                    "outside every read-write plugins.entries.bubblewrap.settings.binds source; the "
++                    "outside every read-write plugins.entries.bubblewrap-yuno.settings.binds source; the "
+                     "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
+                 )
+         # Outside the hidden set the sandbox dir is hidden by a tmpfs on top
